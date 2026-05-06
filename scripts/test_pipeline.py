@@ -16,8 +16,8 @@ try:
         "http://localhost:8000/api/v1/projects/execute",
         json={
             "type": "greenfield",
-            "prompt": "Build an expense tracker app where employees can submit expenses with a category, amount, currency, receipt description, and approval status. Managers can approve or reject expenses.",
-            "project_name": "expense-tracker",
+            "prompt": "Build a customer support ticket system with tickets and comments. Tickets have a subject, description, priority (low/medium/high), and status (open/in_progress/resolved/closed). Comments belong to tickets. I also want a search endpoint to find tickets by keyword and a stats endpoint that returns ticket counts grouped by status.",
+            "project_name": "support-tickets",
         },
         timeout=600.0,
     ) as response:

@@ -3,9 +3,8 @@
 import json
 from datetime import UTC, datetime
 
-from fastapi import APIRouter
+from fastapi import APIRouter, File, Form, UploadFile
 from fastapi.responses import JSONResponse, StreamingResponse
-from pydantic import BaseModel, field_validator
 
 from lakebase_accelerator.agent.graph import get_pipeline_graph
 from lakebase_accelerator.models.enums import PipelineStatus, ProjectMode
@@ -17,35 +16,12 @@ from lakebase_accelerator.models.responses import (
     error_response,
     success_response,
 )
-from lakebase_accelerator.services.dependencies import get_audit_service
+from lakebase_accelerator.services.dependencies import get_audit_service, get_volume_upload_service
+from lakebase_accelerator.services.volume_upload_service import FileValidationError
 from lakebase_accelerator.settings import PROMPT_MAX_LENGTH, PROMPT_MIN_LENGTH
 from lakebase_accelerator.utils.logger import logger
 
 router = APIRouter(prefix="/api/v1/projects", tags=["Projects"])
-
-
-# ─── Request Model ───────────────────────────────────────────────────
-
-
-class PipelineRequest(BaseModel):
-    """Request body for POST /api/v1/projects/execute."""
-
-    type: str = "greenfield"
-    prompt: str
-    project_name: str | None = None
-    volume_path: list[str] | None = None
-
-    @field_validator("prompt")
-    @classmethod
-    def validate_prompt(cls, v: str) -> str:
-        stripped = v.strip()
-        if len(stripped) < PROMPT_MIN_LENGTH:
-            msg = "Prompt must not be empty"
-            raise ValueError(msg)
-        if len(stripped) > PROMPT_MAX_LENGTH:
-            msg = f"Prompt must not exceed {PROMPT_MAX_LENGTH} characters"
-            raise ValueError(msg)
-        return stripped
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -54,20 +30,63 @@ class PipelineRequest(BaseModel):
 
 
 @router.post("/execute", response_model=None)
-async def execute_pipeline(request: PipelineRequest) -> StreamingResponse | JSONResponse:
+async def execute_pipeline(
+    type: str = Form(...),
+    prompt: str = Form(...),
+    project_name: str | None = Form(None),
+    files: list[UploadFile] | None = File(None),
+) -> StreamingResponse | JSONResponse:
     """Execute the accelerator pipeline via multi-agent LangGraph orchestrator.
+
+    Accepts multipart/form-data for both greenfield and brownfield:
+    - Greenfield: type=greenfield, prompt=<text> (no files needed)
+    - Brownfield: type=brownfield, prompt=<text>, files=<binary uploads>
 
     Returns an SSE stream with real-time progress as each node executes.
     """
-    if request.type not in ("greenfield", "brownfield"):
+    # ─── Validate type ───────────────────────────────────────────────
+    if type not in ("greenfield", "brownfield"):
         resp = error_response(message="type must be 'greenfield' or 'brownfield'", status_code=422)
         return JSONResponse(status_code=422, content=resp.model_dump())
 
-    if request.type == "brownfield" and not request.volume_path:
-        resp = error_response(message="volume_path is required for brownfield pipelines", status_code=422)
+    # ─── Validate prompt ─────────────────────────────────────────────
+    prompt = prompt.strip()
+    if len(prompt) < PROMPT_MIN_LENGTH:
+        resp = error_response(message="Prompt must not be empty", status_code=422)
         return JSONResponse(status_code=422, content=resp.model_dump())
 
-    logger.info(f"Starting {request.type} pipeline", extra={"prompt_length": len(request.prompt), "type": request.type})
+    if len(prompt) > PROMPT_MAX_LENGTH:
+        resp = error_response(message=f"Prompt must not exceed {PROMPT_MAX_LENGTH} characters", status_code=422)
+        return JSONResponse(status_code=422, content=resp.model_dump())
+
+    # ─── Brownfield: validate and upload files to Volume ─────────────
+    volume_paths: list[str] = []
+
+    if type == "brownfield":
+        if not files:
+            resp = error_response(
+                message="At least one file is required for brownfield pipelines", status_code=422
+            )
+            return JSONResponse(status_code=422, content=resp.model_dump())
+
+        try:
+            volume_service = get_volume_upload_service()
+            volume_paths = await volume_service.validate_and_upload(files)
+        except FileValidationError as e:
+            resp = error_response(message=e.message, status_code=422)
+            return JSONResponse(status_code=422, content=resp.model_dump())
+        except Exception as e:
+            logger.exception(f"Volume upload failed: {e}")
+            resp = error_response(
+                message="Failed to upload files. Please try again later.", status_code=500
+            )
+            return JSONResponse(status_code=500, content=resp.model_dump())
+
+    # ─── Build pipeline graph ────────────────────────────────────────
+    logger.info(
+        f"Starting {type} pipeline",
+        extra={"prompt_length": len(prompt), "type": type, "file_count": len(volume_paths)},
+    )
 
     try:
         graph = get_pipeline_graph()
@@ -79,10 +98,10 @@ async def execute_pipeline(request: PipelineRequest) -> StreamingResponse | JSON
     # Initial state
     initial_state = {
         "messages": [],
-        "prompt": request.prompt,
-        "project_name": request.project_name or "",
-        "pipeline_type": request.type,
-        "volume_paths": request.volume_path or [],
+        "prompt": prompt,
+        "project_name": project_name or "",
+        "pipeline_type": type,
+        "volume_paths": volume_paths,
         "is_sufficient": True,
         "clarification_questions": [],
         "entities": [],

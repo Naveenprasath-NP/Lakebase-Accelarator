@@ -1,0 +1,57 @@
+command:
+  - "bash"
+  - "-c"
+  - "uv sync --all-extras && uv run uvicorn lakebase_accelerator.main:app --host 0.0.0.0 --port 8000"
+
+env:
+  # ─── Python Path (CRITICAL for src/ layout) ─────────────────────
+  - name: "PYTHONPATH"
+    value: "/app/python/source_code/src"
+
+  # ─── Databricks Workspace ────────────────────────────────────────
+  - name: "DATABRICKS_HOST"
+    value: "https://dbc-c73ed9f3-a15d.cloud.databricks.com"
+  - name: "DATABRICKS_CLIENT_ID"
+    value: "b92071dc-4a32-4d54-bfb8-98c387acce0f"
+  - name: "DATABRICKS_CLIENT_SECRET"
+    value: "dose21d98fe2a5cc71c92d078865897d19c4"
+
+  # ─── Model Serving ──────────────────────────────────────────────
+  - name: "MODEL_SERVING_ENDPOINT"
+    value: "databricks-claude-sonnet-4-5"
+
+  # ─── Lakebase / Postgres ────────────────────────────────────────
+  - name: "POSTGRES_HOST"
+    value: "ep-old-paper-d2xjx2mt.database.us-east-1.cloud.databricks.com"
+  - name: "POSTGRES_PORT"
+    value: "5432"
+  - name: "POSTGRES_USER"
+    value: "b92071dc-4a32-4d54-bfb8-98c387acce0f"
+  - name: "POSTGRES_DB"
+    value: "databricks_postgres"
+  - name: "POSTGRES_SCHEMA"
+    value: "public"
+  - name: "LAKEBASE_ENDPOINT_NAME"
+    value: "projects/lakebase-accelerator-poc/branches/production/endpoints/primary"
+
+  # ─── Application ────────────────────────────────────────────────
+  - name: "APP_NAME"
+    value: "lakebase-accelerator"
+  - name: "CATALOG_NAME"
+    value: "lakebase_accelerator_poc"
+  - name: "DATABRICKS_CATALOG"
+    value: "lakebase_accelerator_poc"
+  - name: "DATABRICKS_SCHEMA"
+    value: "public"
+
+  # ─── Volume Storage (Brownfield) ────────────────────────────────
+  - name: "VOLUME_CATALOG"
+    value: "lakebase_poc_catalog_assets"
+  - name: "VOLUME_SCHEMA"
+    value: "asset_bundles"
+  - name: "VOLUME_NAME"
+    value: "input_files"
+
+  # ─── MLflow ─────────────────────────────────────────────────────
+  - name: "MLFLOW_ENABLE_DB_SDK"
+    value: "true"

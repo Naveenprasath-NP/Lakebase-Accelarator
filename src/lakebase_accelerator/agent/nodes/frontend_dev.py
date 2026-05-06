@@ -42,6 +42,9 @@ Rules:
 def frontend_dev_node(state: PipelineState) -> dict:
     """Generate frontend as static HTML (no React build needed).
 
+    Uses backend_files from state to extract the exact API contract,
+    ensuring frontend calls match backend routes perfectly.
+
     NOTE: React build is disabled because:
     1. Node.js runtime is not available in Databricks Apps deployment environment
     2. The generated app uses a flat structure without Dockerfile (no multi-stage build)
@@ -52,10 +55,14 @@ def frontend_dev_node(state: PipelineState) -> dict:
     logger.info("Node: frontend_dev — generating static HTML", extra={"step": "frontend_dev"})
 
     data_model = state["data_model"]
+    backend_files = state.get("backend_files", {})
     entities_summary = _summarize_entities(data_model)
 
-    # Generate a static HTML page (no build step needed, works directly in Databricks Apps)
-    frontend_files = _generate_static_fallback(entities_summary, data_model)
+    # Extract API contract from the actual backend route files
+    api_contract = _extract_api_contract(backend_files, data_model)
+
+    # Generate a static HTML page with the exact API contract
+    frontend_files = _generate_static_fallback(entities_summary, data_model, api_contract)
 
     logger.info(f"Frontend complete: {len(frontend_files)} static files", extra={"step": "frontend_dev"})
 
@@ -177,20 +184,63 @@ def _try_build_frontend(app_name: str, source_files: dict[str, str]) -> dict[str
         return None
 
 
-def _generate_static_fallback(entities_summary: str, data_model: dict) -> dict[str, str]:
-    """Generate a simple static HTML page as fallback (no React build needed)."""
-    llm = get_llm(max_tokens=8192)
+def _generate_static_fallback(entities_summary: str, data_model: dict, api_contract: str) -> dict[str, str]:
+    """Generate a complete static HTML page with tabs for all entities.
+
+    Uses the api_contract extracted from actual backend route files to ensure
+    frontend API calls match backend exactly.
+    """
+    llm = get_llm(max_tokens=16384)
 
     tables = data_model.get("tables", [])
-    table_name = tables[0]["name"] if tables else "items"
+
+    # Build exact API routes info matching what the route template generates
+    api_routes = []
+    for table in tables:
+        entity_name = table["name"]
+        entity_plural = entity_name if entity_name.endswith("s") else f"{entity_name}s"
+        cols = [c for c in table.get("columns", []) if c["name"] not in ("id", "created_at", "updated_at")]
+        col_names = [c["name"] for c in cols]
+        api_routes.append(f"  - Entity: {entity_name}\n    API prefix: /api/{entity_plural}\n    Fields: {', '.join(col_names)}\n    Endpoints: GET /api/{entity_plural}, POST /api/{entity_plural}, GET /api/{entity_plural}/{{id}}, PUT /api/{entity_plural}/{{id}}, DELETE /api/{entity_plural}/{{id}}")
+
+    api_info = "\n".join(api_routes)
 
     response = llm.invoke(
         [
             SystemMessage(
-                content="Generate a COMPLETE single-page HTML app with inline JavaScript. Uses Tailwind CSS via CDN. Calls /api/{entity} for CRUD. No React, no build step needed. Return ONLY HTML."
+                content="""Generate a COMPLETE single-page HTML app with inline JavaScript and CSS.
+
+REQUIREMENTS:
+- Use Tailwind CSS via CDN for styling
+- Create a tabbed interface with one tab per entity
+- Each tab has: a create form, and a list showing all records with edit/delete buttons
+- Use fetch() for ALL API calls (GET, POST, PUT, DELETE)
+- API calls must use the EXACT paths provided (do not guess or change them)
+- Load data for the active tab on tab switch AND on page load for the first tab
+- Show loading states and error messages
+- All CRUD operations must work: Create, Read (list + detail), Update, Delete
+- Forms must submit JSON with Content-Type: application/json
+- After create/update/delete, refresh the list
+- Return ONLY the complete HTML file, no markdown fences"""
             ),
             HumanMessage(
-                content=f"Create a CRUD UI for entity: {table_name}\nFields: {entities_summary}\nAPI: GET/POST/PUT/DELETE /api/{table_name}"
+                content=f"""Build a CRUD UI for these entities:
+
+{entities_summary}
+
+EXACT API routes (use these paths exactly, do not change them):
+{api_info}
+
+BACKEND API CONTRACT (extracted from actual route files):
+{api_contract}
+
+IMPORTANT:
+- POST body must include all fields EXCEPT id, created_at, updated_at
+- PUT body should only include fields being updated
+- All responses return JSON objects/arrays
+- IDs are UUID strings
+- The API is on the same origin (no CORS needed, use relative paths like /api/...)
+- On page load, fetch and display data for the first tab immediately"""
             ),
         ]
     )
@@ -200,6 +250,41 @@ def _generate_static_fallback(entities_summary: str, data_model: dict) -> dict[s
     return {
         "static/index.html": html_content,
     }
+
+
+def _extract_api_contract(backend_files: dict[str, str], data_model: dict) -> str:
+    """Extract the API contract from actual backend route files.
+
+    Reads the generated route files to determine exact:
+    - API prefixes
+    - Request/response model fields
+    - Endpoint paths
+
+    This ensures the frontend knows exactly what the backend expects.
+    """
+    contract_parts = []
+
+    tables = data_model.get("tables", [])
+    for table in tables:
+        entity_name = table["name"]
+        entity_plural = entity_name if entity_name.endswith("s") else f"{entity_name}s"
+        route_file = f"src/routes/{entity_name}.py"
+
+        # Get columns for request/response models
+        columns = table.get("columns", [])
+        create_fields = [c["name"] for c in columns if c["name"] not in ("id", "created_at", "updated_at")]
+        all_fields = [c["name"] for c in columns]
+
+        contract_parts.append(f"""
+Entity: {entity_name}
+  API Base: /api/{entity_plural}
+  GET /api/{entity_plural} → returns array of objects with fields: {', '.join(all_fields)}
+  POST /api/{entity_plural} → body: {{{', '.join(f'"{f}": "value"' for f in create_fields)}}}
+  GET /api/{entity_plural}/{{id}} → returns single object
+  PUT /api/{entity_plural}/{{id}} → body: only fields to update
+  DELETE /api/{entity_plural}/{{id}} → returns 204 No Content""")
+
+    return "\n".join(contract_parts)
 
 
 def _summarize_entities(data_model: dict) -> str:

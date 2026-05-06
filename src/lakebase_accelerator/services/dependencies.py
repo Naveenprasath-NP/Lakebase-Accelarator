@@ -7,6 +7,7 @@ The WorkspaceClient and connection pool are initialized at app startup (lifespan
 from lakebase_accelerator.client.llm_client import LLMClient
 from lakebase_accelerator.repositories.databricks_apps_repository import DatabricksAppsRepository
 from lakebase_accelerator.repositories.lakebase_repository import LakebaseRepository
+from lakebase_accelerator.repositories.volume_repository import VolumeRepository
 from lakebase_accelerator.repositories.workspace_files_repository import WorkspaceFilesRepository
 from lakebase_accelerator.services.app_deployment_service import AppDeploymentService
 from lakebase_accelerator.services.audit_service import AuditService
@@ -21,6 +22,7 @@ from lakebase_accelerator.services.requirement_intake_service import Requirement
 from lakebase_accelerator.services.schema_provisioning_service import SchemaProvisioningService
 from lakebase_accelerator.services.seed_data_service import SeedDataService
 from lakebase_accelerator.services.validation_service import ValidationService
+from lakebase_accelerator.services.volume_upload_service import VolumeUploadService
 from lakebase_accelerator.settings import get_settings
 
 # ─── Singleton holders (initialized in lifespan) ────────────────────
@@ -93,6 +95,17 @@ def get_databricks_apps_repository() -> DatabricksAppsRepository:
     )
 
 
+def get_volume_repository() -> VolumeRepository:
+    """Create VolumeRepository with workspace client and volume config."""
+    settings = get_settings()
+    return VolumeRepository(
+        workspace_client=get_workspace_client(),
+        catalog=settings.volume_catalog,
+        schema=settings.volume_schema,
+        volume=settings.volume_name,
+    )
+
+
 # ─── Service factories ──────────────────────────────────────────────
 
 
@@ -148,6 +161,11 @@ def get_permission_service() -> PermissionService:
 
 def get_audit_service() -> AuditService:
     return AuditService(lakebase_repo=get_lakebase_repository())
+
+
+def get_volume_upload_service() -> VolumeUploadService:
+    """Create VolumeUploadService with volume repository."""
+    return VolumeUploadService(volume_repo=get_volume_repository())
 
 
 # ─── Pipeline factory ────────────────────────────────────────────────

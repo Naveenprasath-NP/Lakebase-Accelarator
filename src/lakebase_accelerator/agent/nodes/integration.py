@@ -160,13 +160,15 @@ def _check_python_syntax(code: str) -> str | None:
 
 
 def _generate_app_name(project_name: str) -> str:
+    """Generate a Databricks App name (max 30 characters)."""
     import re
     from uuid import uuid4
 
     sanitized = re.sub(r"[^a-z0-9-]", "-", project_name.lower())
     sanitized = re.sub(r"-+", "-", sanitized).strip("-")
     suffix = uuid4().hex[:6]
-    return f"{sanitized[:50]}-{suffix}"
+    # Databricks Apps: max 30 chars. Reserve 7 for "-" + 6-char suffix
+    return f"{sanitized[:23]}-{suffix}"
 
 
 def _generate_app_yaml(schema_name: str, app_name: str) -> str:

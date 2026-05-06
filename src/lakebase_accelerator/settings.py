@@ -64,6 +64,16 @@ class Settings(BaseSettings):
     Format: projects/<project-id>/branches/<branch-id>/endpoints/<endpoint-id>
     If set, uses SDK OAuth. If empty, uses POSTGRES_PASSWORD directly."""
 
+    # ─── Volume Storage (Brownfield) ────────────────────────────────
+    volume_catalog: str = "lakebase_poc_catalog_assets"
+    """Unity Catalog name for the volume storing uploaded assets."""
+
+    volume_schema: str = "asset_bundles"
+    """Schema name within the volume catalog."""
+
+    volume_name: str = "input_files"
+    """Volume name for storing uploaded brownfield files."""
+
     # ─── Application ─────────────────────────────────────────────────
     app_name: str = "lakebase-accelerator"
     """Accelerator application name."""

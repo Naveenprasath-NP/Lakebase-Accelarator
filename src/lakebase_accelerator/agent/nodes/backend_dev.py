@@ -122,23 +122,31 @@ def backend_dev_node(state: PipelineState) -> dict:
 
 
 def _generate_backend(state: PipelineState) -> dict:
-    """Normal backend generation flow.
+    """Hybrid backend generation: templates as foundation + LLM for routes.
 
-    Uses templates for boilerplate (app.py, database.py, __init__.py, requirements.txt, app.yaml)
-    and LLM only for entity-specific files (routes, models).
+    Fixed files (templates, always correct):
+    - app.py, database.py, src/__init__.py, requirements.txt, app.yaml, routes/__init__.py
+
+    LLM-generated (with template context as reference):
+    - src/routes/{entity}.py — LLM generates these but gets the working template
+      as reference so it follows the exact same patterns (imports, db calls, response models)
+
+    The LLM can add custom logic beyond basic CRUD if the prompt requires it,
+    but must follow the template structure and declare all dependencies.
     """
-    llm = get_llm(max_tokens=2048)
     data_model = state["data_model"]
     schema_name = state["schema_name"]
     app_name = state.get("app_name", "generated-app")
+    prompt = state.get("prompt", "")
     data_model_summary = _summarize_data_model(data_model)
 
     # ─── Template-based files (deterministic, no LLM) ────────────────
     backend_files: dict[str, str] = {}
 
-    # app.py — from template
     tables = data_model.get("tables", [])
     first_entity = tables[0]["name"] if tables else "items"
+
+    # app.py — from template
     backend_files["app.py"] = _render_template("app.py.j2", {
         "app_title": state.get("project_name", "Generated App").replace("-", " ").title(),
         "entity_plural": first_entity,
@@ -150,30 +158,37 @@ def _generate_backend(state: PipelineState) -> dict:
     # src/__init__.py — always empty
     backend_files["src/__init__.py"] = '"""Source package."""\n'
 
-    # requirements.txt — fixed
-    backend_files["requirements.txt"] = (
-        "fastapi==0.115.6\n"
-        "uvicorn==0.34.0\n"
-        "psycopg2-binary==2.9.10\n"
-        "pydantic[email]==2.10.4\n"
-        "httpx==0.28.1\n"
-    )
+    # Base requirements — LLM can add more below
+    base_requirements = [
+        "fastapi==0.115.6",
+        "uvicorn==0.34.0",
+        "psycopg2-binary==2.9.10",
+        "pydantic[email]==2.10.4",
+        "httpx==0.28.1",
+    ]
 
     # app.yaml — from settings
     backend_files["app.yaml"] = _generate_app_yaml(schema_name, app_name)
 
-    # ─── LLM-generated files (entity-specific) ───────────────────────
+    # ─── LLM-generated routes (with template as reference) ───────────
 
-    # Plan which route files to generate
-    route_files = [f"src/routes/{t['name']}.py" for t in tables]
+    # Get the reference template so LLM knows the exact pattern
+    reference_route = _generate_route_from_template(tables[0]) if tables else ""
+
+    # Generate routes using LLM with template context
+    extra_requirements = []
+    for table in tables:
+        file_path = f"src/routes/{table['name']}.py"
+        logger.info(f"Generating: {file_path}", extra={"step": "backend_dev"})
+        content, deps = _generate_route_with_llm(table, data_model, prompt, reference_route, data_model_summary)
+        backend_files[file_path] = content
+        extra_requirements.extend(deps)
 
     # Generate routes/__init__.py (re-export)
     if tables:
-        entity_imports = "\n".join(f"from .{t['name']} import router as {t['name']}_router" for t in tables)
         if len(tables) == 1:
             backend_files["src/routes/__init__.py"] = f'from .{tables[0]["name"]} import router\n\n__all__ = ["router"]\n'
         else:
-            # Multiple entities — merge routers
             from_imports = "\n".join(f"from .{t['name']} import router as {t['name']}_router" for t in tables)
             include_lines = "\n".join(f"router.include_router({t['name']}_router)" for t in tables)
             backend_files["src/routes/__init__.py"] = (
@@ -188,12 +203,12 @@ def _generate_backend(state: PipelineState) -> dict:
             "from fastapi import APIRouter\n\nrouter = APIRouter()\n\n__all__ = [\"router\"]\n"
         )
 
-    # Generate each route file using TEMPLATE (not LLM — prevents wrong imports)
-    for table in tables:
-        file_path = f"src/routes/{table['name']}.py"
-        logger.info(f"Generating: {file_path}", extra={"step": "backend_dev"})
-        content = _generate_route_from_template(table)
-        backend_files[file_path] = content
+    # Merge requirements (base + any extra the LLM declared)
+    all_requirements = list(set(base_requirements + extra_requirements))
+    backend_files["requirements.txt"] = "\n".join(sorted(all_requirements)) + "\n"
+
+    # Force src/__init__.py empty (safety net)
+    backend_files["src/__init__.py"] = '"""Source package."""\n'
 
     logger.info(f"Backend complete: {len(backend_files)} files", extra={"step": "backend_dev"})
 
@@ -456,6 +471,83 @@ def _generate_route_from_template(table: dict) -> str:
         "insert_placeholders": insert_placeholders,
         "insert_values": insert_values,
     })
+
+
+def _generate_route_with_llm(table: dict, data_model: dict, user_prompt: str, reference_route: str, data_model_summary: str) -> tuple[str, list[str]]:
+    """Generate a route file using LLM with the template as reference context.
+
+    The LLM gets:
+    1. The working template output as a REFERENCE (so it knows the exact pattern)
+    2. The user's original prompt (so it can add custom logic if needed)
+    3. The full data model (so it knows about relationships/FKs)
+    4. Strict rules about what it can and cannot do
+
+    Returns: (route_code, extra_requirements_list)
+    """
+    llm = get_llm(max_tokens=8192)
+    entity_name = table["name"]
+    entity_plural = entity_name if entity_name.endswith("s") else f"{entity_name}s"
+
+    columns_info = json.dumps(table.get("columns", []), indent=2)
+    fks = table.get("foreign_keys", [])
+    fk_info = json.dumps(fks, indent=2) if fks else "none"
+
+    prompt = f"""Generate a COMPLETE FastAPI route file for entity: {entity_name}
+
+USER'S ORIGINAL REQUEST:
+{user_prompt}
+
+DATA MODEL:
+{data_model_summary}
+
+THIS TABLE:
+  Name: {entity_name}
+  API prefix: /api/{entity_plural}
+  Columns: {columns_info}
+  Foreign Keys: {fk_info}
+
+REFERENCE CODE (follow this EXACT pattern for imports, db calls, and structure):
+```python
+{reference_route[:3000]}
+```
+
+STRICT RULES:
+1. MUST import from src.database: `from src.database import get_db_cursor`
+2. MUST use psycopg2.sql for identifiers: `sql.Identifier("table_name")`
+3. MUST use %s for parameterized values (never f-strings in SQL)
+4. MUST define router as: `router = APIRouter(prefix="/api/{entity_plural}", tags=["{entity_plural}"])`
+5. MUST use Pydantic BaseModel for request/response (Optional for nullable fields)
+6. MUST handle NULL columns with Optional[str] = None in response models
+7. CAN add custom endpoints beyond CRUD if the user's request requires it
+8. CAN add join queries if foreign keys exist and the user needs related data
+9. CANNOT import libraries not in this list: fastapi, pydantic, psycopg2, httpx, uuid, datetime, typing, os, json
+10. If you need an additional library, add a comment at the TOP: # REQUIRES: library_name==version
+
+Return ONLY the complete Python file. No markdown fences."""
+
+    response = llm.invoke(
+        [
+            SystemMessage(content="Generate a complete FastAPI route file. Follow the reference code pattern exactly for imports and database calls. You may add custom endpoints if the user's request requires it. Return ONLY Python code."),
+            HumanMessage(content=prompt),
+        ]
+    )
+    content = _strip_markdown(response.content)
+
+    # Validate syntax
+    error = _check_python_syntax(content)
+    if error:
+        logger.warning(f"LLM route has syntax error: {error}. Falling back to template.", extra={"step": "backend_dev"})
+        content = _generate_route_from_template(table)
+
+    # Extract any extra requirements declared by the LLM
+    extra_deps = []
+    for line in content.split("\n")[:10]:
+        if line.strip().startswith("# REQUIRES:"):
+            dep = line.replace("# REQUIRES:", "").strip()
+            if dep:
+                extra_deps.append(dep)
+
+    return content, extra_deps
 
 
 def _summarize_data_model(data_model: dict) -> str:
