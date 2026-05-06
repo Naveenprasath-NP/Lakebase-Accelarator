@@ -1,0 +1,58 @@
+"""{{ app_title }} — FastAPI entry point for Databricks Apps deployment.
+
+Serves:
+- API routes at /api/{{ entity_plural }}/*
+- Static frontend at /
+- Health check at /health
+"""
+
+from contextlib import asynccontextmanager
+
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import JSONResponse
+
+from src.database import init_db, close_db, get_db_cursor
+from src.routes import router
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Initialize database pool on startup, close on shutdown."""
+    init_db()
+    yield
+    close_db()
+
+
+app = FastAPI(title="{{ app_title }}", lifespan=lifespan)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+@app.get("/health")
+async def health_check():
+    """Health check endpoint — verifies database connectivity."""
+    try:
+        with get_db_cursor() as cursor:
+            cursor.execute("SELECT 1")
+            cursor.fetchone()
+        return JSONResponse(content={"status": "healthy", "database": "connected"})
+    except Exception as e:
+        return JSONResponse(
+            content={"status": "unhealthy", "database": "disconnected", "error": str(e)},
+            status_code=503,
+        )
+
+
+# Register API routes
+app.include_router(router)
+
+# Serve static frontend (must be LAST — catches all non-API paths)
+app.mount("/", StaticFiles(directory="static", html=True), name="static")

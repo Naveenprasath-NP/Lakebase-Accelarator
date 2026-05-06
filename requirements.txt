@@ -1,0 +1,6 @@
+streamlit
+psycopg2-binary
+databricks-sdk
+pyyaml
+hypothesis
+pytest

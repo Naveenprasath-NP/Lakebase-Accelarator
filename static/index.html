@@ -1,0 +1,388 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lakebase Accelerator — Test Console</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #0f1419;
+            color: #e7e9ea;
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+        }
+        header {
+            background: #1a1f25;
+            border-bottom: 1px solid #2f3336;
+            padding: 16px 24px;
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+        header .logo {
+            width: 32px; height: 32px;
+            background: #e53935;
+            border-radius: 6px;
+            display: flex; align-items: center; justify-content: center;
+            font-weight: bold; font-size: 14px;
+        }
+        header h1 { font-size: 16px; font-weight: 600; }
+        header .mode-badge {
+            background: #1d3a2e;
+            color: #4caf50;
+            padding: 4px 10px;
+            border-radius: 12px;
+            font-size: 12px;
+            font-weight: 500;
+        }
+
+        .container {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            max-width: 800px;
+            width: 100%;
+            margin: 0 auto;
+            padding: 24px;
+            overflow-y: auto;
+        }
+
+        .welcome {
+            text-align: center;
+            margin-top: 80px;
+            margin-bottom: 40px;
+        }
+        .welcome h2 { font-size: 28px; margin-bottom: 12px; }
+        .welcome p { color: #8b98a5; font-size: 14px; line-height: 1.6; }
+
+        #pipeline-progress {
+            display: none;
+            margin-bottom: 24px;
+        }
+        .step-item {
+            display: flex;
+            align-items: flex-start;
+            gap: 12px;
+            padding: 10px 0;
+            border-bottom: 1px solid #2f3336;
+        }
+        .step-icon {
+            width: 20px; height: 20px;
+            border-radius: 50%;
+            display: flex; align-items: center; justify-content: center;
+            font-size: 11px;
+            flex-shrink: 0;
+            margin-top: 2px;
+        }
+        .step-icon.pending { background: #2f3336; color: #8b98a5; }
+        .step-icon.running { background: #1d3a5c; color: #42a5f5; animation: pulse 1.5s infinite; }
+        .step-icon.completed { background: #1d3a2e; color: #4caf50; }
+        .step-icon.failed { background: #3a1d1d; color: #e53935; }
+        @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.5; } }
+
+        .step-content { flex: 1; }
+        .step-name { font-size: 14px; font-weight: 500; }
+        .step-message { font-size: 12px; color: #8b98a5; margin-top: 2px; }
+
+        #result-panel {
+            display: none;
+            background: #1a1f25;
+            border: 1px solid #2f3336;
+            border-radius: 12px;
+            padding: 24px;
+            margin-bottom: 24px;
+        }
+        .result-header {
+            display: flex; align-items: center; gap: 12px; margin-bottom: 16px;
+        }
+        .result-header .check { color: #4caf50; font-size: 24px; }
+        .result-header h3 { font-size: 18px; }
+        .result-field {
+            display: flex; justify-content: space-between;
+            padding: 8px 0; border-bottom: 1px solid #2f3336;
+            font-size: 13px;
+        }
+        .result-field .label { color: #8b98a5; }
+        .result-field .value { color: #e7e9ea; font-family: monospace; }
+        .result-field a { color: #42a5f5; text-decoration: none; }
+        .result-field a:hover { text-decoration: underline; }
+        .tables-list {
+            display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px;
+        }
+        .table-chip {
+            background: #2f3336; padding: 4px 10px; border-radius: 6px;
+            font-size: 12px; font-family: monospace;
+        }
+
+        .input-area {
+            position: sticky;
+            bottom: 0;
+            background: #0f1419;
+            padding: 16px 0;
+        }
+        .input-wrapper {
+            background: #1a1f25;
+            border: 1px solid #2f3336;
+            border-radius: 12px;
+            padding: 16px;
+            display: flex;
+            gap: 12px;
+        }
+        .input-wrapper textarea {
+            flex: 1;
+            background: transparent;
+            border: none;
+            color: #e7e9ea;
+            font-size: 14px;
+            resize: none;
+            outline: none;
+            font-family: inherit;
+            min-height: 24px;
+            max-height: 120px;
+        }
+        .input-wrapper textarea::placeholder { color: #8b98a5; }
+        .send-btn {
+            width: 36px; height: 36px;
+            background: #42a5f5;
+            border: none;
+            border-radius: 50%;
+            color: white;
+            cursor: pointer;
+            display: flex; align-items: center; justify-content: center;
+            flex-shrink: 0;
+            align-self: flex-end;
+        }
+        .send-btn:disabled { background: #2f3336; cursor: not-allowed; }
+        .send-btn:hover:not(:disabled) { background: #1e88e5; }
+
+        .error-banner {
+            background: #3a1d1d;
+            border: 1px solid #e53935;
+            border-radius: 8px;
+            padding: 12px 16px;
+            margin-bottom: 16px;
+            display: none;
+        }
+        .error-banner .title { color: #e53935; font-weight: 600; font-size: 14px; }
+        .error-banner .detail { color: #ef9a9a; font-size: 12px; margin-top: 4px; }
+    </style>
+</head>
+<body>
+    <header>
+        <div class="logo">Z</div>
+        <h1>Lakebase Accelerator</h1>
+        <span class="mode-badge">Greenfield · Test Console</span>
+    </header>
+
+    <div class="container">
+        <div class="welcome" id="welcome">
+            <h2>Build something new</h2>
+            <p>Describe your application. The agent will provision Lakebase,<br>
+            design your schema, generate code, and deploy to Databricks Apps.</p>
+        </div>
+
+        <div class="error-banner" id="error-banner">
+            <div class="title" id="error-title">Pipeline Failed</div>
+            <div class="detail" id="error-detail"></div>
+        </div>
+
+        <div id="pipeline-progress"></div>
+
+        <div id="result-panel">
+            <div class="result-header">
+                <span class="check">✓</span>
+                <h3>Deployment Complete</h3>
+            </div>
+            <div class="result-field">
+                <span class="label">App URL</span>
+                <span class="value"><a id="result-url" href="#" target="_blank">—</a></span>
+            </div>
+            <div class="result-field">
+                <span class="label">Schema</span>
+                <span class="value" id="result-schema">—</span>
+            </div>
+            <div class="result-field">
+                <span class="label">Catalog</span>
+                <span class="value" id="result-catalog">—</span>
+            </div>
+            <div class="result-field">
+                <span class="label">Duration</span>
+                <span class="value" id="result-duration">—</span>
+            </div>
+            <div style="margin-top: 12px;">
+                <span style="color: #8b98a5; font-size: 13px;">Generated Tables</span>
+                <div class="tables-list" id="result-tables"></div>
+            </div>
+        </div>
+    </div>
+
+    <div class="input-area">
+        <div class="input-wrapper" style="max-width: 800px; margin: 0 auto;">
+            <textarea id="prompt-input" placeholder="Describe the application you want to build on Databricks..." rows="1"></textarea>
+            <button class="send-btn" id="send-btn" onclick="startPipeline()">→</button>
+        </div>
+    </div>
+
+    <script>
+        const STEPS = [
+            { id: 'intake', name: 'Analyzing Requirements' },
+            { id: 'data_model', name: 'Designing Data Model' },
+            { id: 'schema_provisioning', name: 'Provisioning Lakebase' },
+            { id: 'seed_data', name: 'Generating Sample Data' },
+            { id: 'backend_dev', name: 'Building Backend' },
+            { id: 'frontend_dev', name: 'Building Frontend' },
+            { id: 'integration', name: 'Integration & Validation' },
+            { id: 'deployment', name: 'Deploying Application' },
+        ];
+
+        function renderSteps() {
+            const container = document.getElementById('pipeline-progress');
+            container.innerHTML = STEPS.map(step => `
+                <div class="step-item" id="step-${step.id}">
+                    <div class="step-icon pending" id="icon-${step.id}">○</div>
+                    <div class="step-content">
+                        <div class="step-name">${step.name}</div>
+                        <div class="step-message" id="msg-${step.id}"></div>
+                    </div>
+                </div>
+            `).join('');
+            container.style.display = 'block';
+        }
+
+        function updateStep(stepId, status, message) {
+            const icon = document.getElementById(`icon-${stepId}`);
+            const msg = document.getElementById(`msg-${stepId}`);
+            if (!icon) return;
+
+            icon.className = `step-icon ${status}`;
+            if (status === 'running') icon.textContent = '◉';
+            else if (status === 'completed') icon.textContent = '✓';
+            else if (status === 'failed') icon.textContent = '✗';
+
+            if (msg && message) msg.textContent = message;
+        }
+
+        function showResult(data) {
+            const panel = document.getElementById('result-panel');
+            panel.style.display = 'block';
+
+            document.getElementById('result-url').href = data.app_url || '#';
+            document.getElementById('result-url').textContent = data.app_url || '—';
+            document.getElementById('result-schema').textContent = data.schema_name || '—';
+            document.getElementById('result-catalog').textContent = data.catalog || '—';
+            document.getElementById('result-duration').textContent =
+                data.pipeline_duration_seconds ? `${data.pipeline_duration_seconds}s` : '—';
+
+            const tablesEl = document.getElementById('result-tables');
+            tablesEl.innerHTML = (data.tables_created || [])
+                .map(t => `<span class="table-chip">${t}</span>`).join('');
+        }
+
+        function showError(title, detail) {
+            const banner = document.getElementById('error-banner');
+            banner.style.display = 'block';
+            document.getElementById('error-title').textContent = title;
+            document.getElementById('error-detail').textContent = detail;
+        }
+
+        async function startPipeline() {
+            const input = document.getElementById('prompt-input');
+            const prompt = input.value.trim();
+            if (!prompt) return;
+
+            // Reset UI
+            document.getElementById('welcome').style.display = 'none';
+            document.getElementById('error-banner').style.display = 'none';
+            document.getElementById('result-panel').style.display = 'none';
+            document.getElementById('send-btn').disabled = true;
+            input.disabled = true;
+
+            renderSteps();
+
+            try {
+                const response = await fetch('/api/v1/projects/execute', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ type: 'greenfield', prompt: prompt }),
+                });
+
+                if (!response.ok) {
+                    const err = await response.json();
+                    showError('Request Failed', err.detail?.message || JSON.stringify(err));
+                    return;
+                }
+
+                const reader = response.body.getReader();
+                const decoder = new TextDecoder();
+                let buffer = '';
+
+                while (true) {
+                    const { done, value } = await reader.read();
+                    if (done) break;
+
+                    buffer += decoder.decode(value, { stream: true });
+                    const lines = buffer.split('\n');
+                    buffer = lines.pop() || '';
+
+                    let eventType = '';
+                    for (const line of lines) {
+                        if (line.startsWith('event: ')) {
+                            eventType = line.slice(7).trim();
+                        } else if (line.startsWith('data: ')) {
+                            const data = JSON.parse(line.slice(6));
+                            handleEvent(eventType, data);
+                        }
+                    }
+                }
+            } catch (err) {
+                showError('Connection Error', err.message);
+            } finally {
+                document.getElementById('send-btn').disabled = false;
+                input.disabled = false;
+            }
+        }
+
+        function handleEvent(eventType, data) {
+            const stepId = data.step;
+
+            switch (eventType) {
+                case 'step_started':
+                    updateStep(stepId, 'running', data.message);
+                    break;
+                case 'step_completed':
+                    updateStep(stepId, 'completed', data.message);
+                    break;
+                case 'step_failed':
+                    updateStep(stepId, 'failed', data.message);
+                    break;
+                case 'pipeline_complete':
+                    if (data.status === 'completed') {
+                        showResult(data.data);
+                    } else {
+                        showError(
+                            `Pipeline failed at: ${data.data?.failed_step || 'unknown'}`,
+                            data.message
+                        );
+                    }
+                    break;
+            }
+        }
+
+        // Auto-resize textarea
+        const textarea = document.getElementById('prompt-input');
+        textarea.addEventListener('input', function() {
+            this.style.height = 'auto';
+            this.style.height = Math.min(this.scrollHeight, 120) + 'px';
+        });
+        textarea.addEventListener('keydown', function(e) {
+            if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                startPipeline();
+            }
+        });
+    </script>
+</body>
+</html>

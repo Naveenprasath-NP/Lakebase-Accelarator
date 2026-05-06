@@ -1,0 +1,821 @@
+openapi: 3.1.0
+info:
+  title: Lakebase Accelerator API
+  description: |
+    Backend API for the Zeb Agentic Lakebase Accelerator.
+
+    ## Overview
+    Provides a unified pipeline execution endpoint (SSE streaming),
+    project history listing, and project detail retrieval.
+    The frontend is developed by a separate team and consumes this API.
+
+    ## Response Structure
+    All JSON responses follow a consistent envelope:
+    ```json
+    {
+      "success": true|false,
+      "statusCode": 200,
+      "message": "Human-readable message",
+      "data": { ... } | null
+    }
+    ```
+
+    ## SSE Streaming (Pipeline Execution)
+    The POST endpoint returns `text/event-stream` responses.
+    Each event follows the format:
+    ```
+    event: <event_type>
+    data: <JSON payload>
+    ```
+
+    ### SSE Event Types (in order):
+    1. `step_started` — Emitted when a pipeline step begins
+    2. `step_completed` — Emitted when a pipeline step succeeds
+    3. `step_failed` — Emitted when a pipeline step fails (pipeline stops)
+    4. `pipeline_complete` — Always the FINAL event (success or failure)
+
+    ### Pipeline Steps (Greenfield — 12 steps):
+    1. `requirement_intake` — Analyzing Requirements
+    2. `data_model_inference` — Designing Data Model
+    3. `schema_provisioning` — Provisioning Lakebase
+    4. `seed_data_generation` — Generating Sample Data
+    5. `frontend_generation` — Building Apps (Frontend)
+    6. `backend_generation` — Building Apps (Backend)
+    7. `deployment_config` — Preparing Deployment Config
+    8. `validation` — Validating Application
+    9. `workspace_write` — Writing to Workspace
+    10. `app_deployment` — Deploying Application
+    11. `permission_grant` — Configuring Permissions
+    12. `audit` — Recording Audit
+
+    ### Pipeline Steps (Brownfield — 12 steps):
+    Same as greenfield except step 1 is `prototype_ingestion` instead of `requirement_intake`.
+
+  version: 1.0.0
+  contact:
+    name: Zeb Engineering
+
+servers:
+  - url: http://localhost:8000
+    description: Local development
+  - url: https://{workspace_host}/apps/{app_name}
+    description: Databricks Apps deployment
+    variables:
+      workspace_host:
+        default: dbc-c73ed9f3-a15d.cloud.databricks.com
+      app_name:
+        default: lakebase-accelerator
+
+tags:
+  - name: Pipeline
+    description: Unified pipeline execution (SSE streaming)
+  - name: Projects
+    description: Project history and detail
+  - name: Health
+    description: Operational health and readiness checks
+
+paths:
+  # ═══════════════════════════════════════════════════════════════════
+  # PIPELINE ENDPOINT (SSE) — Single unified endpoint
+  # ═══════════════════════════════════════════════════════════════════
+
+  /api/v1/projects/execute:
+    post:
+      operationId: executePipeline
+      tags: [Pipeline]
+      summary: Execute pipeline (SSE stream)
+      description: |
+        Unified endpoint for both greenfield and brownfield pipelines.
+
+        **Greenfield:** Accepts `application/json` with `type` and `prompt`. The agent analyzes the prompt, creates schema, generates code, and deploys.
+        **Brownfield:** Accepts `multipart/form-data` with `type`, `prompt`, and one or more binary `files` (zip, images, PDFs, etc.). The backend uploads the files to a Databricks Volume and then runs the pipeline. The agent reverse-engineers the prototype and deploys a production-ready version.
+
+        **Returns:** `text/event-stream` (Server-Sent Events) with real-time pipeline progress.
+
+        **Flow:**
+        1. User submits request with type + prompt (greenfield JSON) or type + prompt + files (brownfield multipart)
+        2. Server returns SSE stream immediately
+        3. Each pipeline step emits `step_started` → `step_completed` (or `step_failed`)
+        4. Final event is always `pipeline_complete`
+
+        **On success:** `pipeline_complete` contains `app_url`, `app_name`, `schema_name`, `catalog`, `tables_created`
+        **On failure:** `pipeline_complete` contains `failed_step`, `error_code`, `completed_steps`
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GreenfieldPipelineRequest'
+            examples:
+              greenfield:
+                summary: Greenfield — new app from prompt
+                value:
+                  type: "greenfield"
+                  prompt: "Build a customer service copilot app that stores customer profiles, support tickets, ticket actions, sentiment summaries, and escalation workflows."
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/BrownfieldPipelineRequest'
+            encoding:
+              files:
+                contentType: application/zip, application/pdf, image/png, image/jpeg, application/octet-stream
+            examples:
+              brownfield:
+                summary: Brownfield — migrate existing prototype with file uploads
+                value:
+                  type: "brownfield"
+                  prompt: "Migrate this logistics scorecard application to production. It has a dashboard with KPIs, shipment tracking, and vendor ratings."
+                  files: "(binary file data)"
+      responses:
+        '200':
+          description: |
+            SSE stream of pipeline progress events.
+            Content-Type: text/event-stream
+          content:
+            text/event-stream:
+              schema:
+                $ref: '#/components/schemas/SSEEvent'
+              examples:
+                step_started:
+                  summary: "Step started — Analyzing Requirements"
+                  value: |
+                    event: step_started
+                    data: {"step":"requirement_intake","status":"running","message":"Analyzing business prompt...","data":{},"timestamp":"2026-05-05T10:00:00Z"}
+                step_completed:
+                  summary: "Step completed — Requirements analyzed"
+                  value: |
+                    event: step_completed
+                    data: {"step":"requirement_intake","status":"completed","message":"Identified 5 entities, 4 relationships","data":{"entity_count":5,"relationship_count":4},"timestamp":"2026-05-05T10:00:12Z"}
+                pipeline_success:
+                  summary: "Pipeline complete — App deployed"
+                  value: |
+                    event: pipeline_complete
+                    data: {"step":null,"status":"completed","message":"App deployed successfully","data":{"app_url":"https://adb-1656668810042917.azuredatabricks.net/apps/customer-service-copilot-a1b2c3","app_name":"CustomerServiceCopilotApp","schema_name":"project_customer_service_copilot_a1b2c3","catalog":"lakebase_accelerator_poc","tables_created":["customers","tickets","ticket_events","sentiments","escalations"],"completed_steps":["requirement_intake","data_model_inference","schema_provisioning","seed_data_generation","frontend_generation","backend_generation","deployment_config","validation","workspace_write","app_deployment","permission_grant","audit"],"pipeline_duration_seconds":225.5},"timestamp":"2026-05-05T10:03:45Z"}
+                step_failed:
+                  summary: "Step failed — Schema provisioning error"
+                  value: |
+                    event: step_failed
+                    data: {"step":"schema_provisioning","status":"failed","message":"Failed to create schema: connection timeout","data":{"error_code":"SCHEMA_CREATION_FAILED"},"timestamp":"2026-05-05T10:01:30Z"}
+                pipeline_failed:
+                  summary: "Pipeline complete — Failed"
+                  value: |
+                    event: pipeline_complete
+                    data: {"step":null,"status":"failed","message":"Pipeline failed: Failed to create schema: connection timeout","data":{"error_code":"SCHEMA_CREATION_FAILED","failed_step":"schema_provisioning","completed_steps":["requirement_intake","data_model_inference"]},"timestamp":"2026-05-05T10:01:30Z"}
+        '400':
+          description: Bad request — malformed JSON body
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse'
+              example:
+                success: false
+                statusCode: 400
+                message: "Invalid JSON in request body"
+                data: null
+        '422':
+          description: Validation error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse'
+              examples:
+                empty_prompt:
+                  summary: Empty prompt
+                  value:
+                    success: false
+                    statusCode: 422
+                    message: "Prompt must not be empty"
+                    data: null
+                prompt_too_long:
+                  summary: Prompt exceeds 10000 characters
+                  value:
+                    success: false
+                    statusCode: 422
+                    message: "Prompt must not exceed 10000 characters"
+                    data: null
+                invalid_type:
+                  summary: Invalid pipeline type
+                  value:
+                    success: false
+                    statusCode: 422
+                    message: "type must be 'greenfield' or 'brownfield'"
+                    data: null
+                missing_files:
+                  summary: Brownfield without files
+                  value:
+                    success: false
+                    statusCode: 422
+                    message: "At least one file is required for brownfield pipelines"
+                    data: null
+                file_too_large:
+                  summary: File exceeds size limit
+                  value:
+                    success: false
+                    statusCode: 422
+                    message: "File size must not exceed 5MB"
+                    data: null
+                unsupported_file_type:
+                  summary: Unsupported file type
+                  value:
+                    success: false
+                    statusCode: 422
+                    message: "Unsupported file type. Allowed: zip, pdf, png, jpg, jpeg"
+                    data: null
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse'
+              example:
+                success: false
+                statusCode: 500
+                message: "An unexpected error occurred. Please try again later."
+                data: null
+        '503':
+          description: Service unavailable — dependencies not ready
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse'
+              example:
+                success: false
+                statusCode: 503
+                message: "Pipeline dependencies not initialized. Check Lakebase and Model Serving connectivity."
+                data: null
+
+  # ═══════════════════════════════════════════════════════════════════
+  # PROJECT ENDPOINTS (JSON)
+  # ═══════════════════════════════════════════════════════════════════
+
+  /api/v1/projects:
+    get:
+      operationId: listProjects
+      tags: [Projects]
+      summary: List all projects (chat history)
+      description: |
+        Returns a paginated list of all projects ordered by creation date descending.
+        Used by the frontend history panel to show past chats with their mode, status, and timestamp.
+      parameters:
+        - name: mode
+          in: query
+          required: false
+          description: Filter by pipeline mode
+          schema:
+            type: string
+            enum: [greenfield, brownfield]
+        - name: status
+          in: query
+          required: false
+          description: Filter by project status
+          schema:
+            type: string
+            enum: [pending, in_progress, completed, failed]
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 50
+            minimum: 1
+            maximum: 100
+        - name: offset
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 0
+            minimum: 0
+      responses:
+        '200':
+          description: Project list retrieved successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProjectListApiResponse'
+              example:
+                success: true
+                statusCode: 200
+                message: "Projects retrieved successfully"
+                data:
+                  projects:
+                    - id: "550e8400-e29b-41d4-a716-446655440000"
+                      project_name: "customer-service-copilot"
+                      type: "greenfield"
+                      status: "completed"
+                      prompt_preview: "Build a customer service copilot app that stores..."
+                      app_url: "https://adb-1656668810042917.azuredatabricks.net/apps/customer-service-copilot-a1b2c3"
+                      created_at: "2026-05-05T12:12:00Z"
+                    - id: "660e8400-e29b-41d4-a716-446655440001"
+                      project_name: "logistics-scorecard"
+                      type: "brownfield"
+                      status: "completed"
+                      prompt_preview: "Migrate this logistics scorecard application..."
+                      app_url: "https://adb-1989632857232241.azuredatabricks.net/apps/logistics-scorecard-b2c3d4"
+                      created_at: "2026-05-05T09:11:00Z"
+                  total: 2
+                  limit: 50
+                  offset: 0
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse'
+              example:
+                success: false
+                statusCode: 500
+                message: "An unexpected error occurred. Please try again later."
+                data: null
+
+  /api/v1/projects/{project_id}:
+    get:
+      operationId: getProjectDetail
+      tags: [Projects]
+      summary: Get project detail (resume view)
+      description: |
+        Returns full details of a specific project including the original prompt,
+        deployment result (app URL, schema, catalog, tables), pipeline step history,
+        and current status. Used when a user clicks a history item to resume or view results.
+      parameters:
+        - name: project_id
+          in: path
+          required: true
+          description: UUID of the project
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Project detail retrieved successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProjectDetailApiResponse'
+              example:
+                success: true
+                statusCode: 200
+                message: "Project retrieved successfully"
+                data:
+                  id: "550e8400-e29b-41d4-a716-446655440000"
+                  project_name: "customer-service-copilot"
+                  type: "greenfield"
+                  status: "completed"
+                  prompt: "Build a customer service copilot app that stores customer profiles, support tickets, ticket actions, sentiment summaries, and escalation workflows."
+                  app_name: "CustomerServiceCopilotApp"
+                  app_url: "https://adb-1656668810042917.azuredatabricks.net/apps/customer-service-copilot-a1b2c3"
+                  schema_name: "project_customer_service_copilot_a1b2c3"
+                  catalog: "lakebase_accelerator_poc"
+                  tables_created:
+                    - "customers"
+                    - "tickets"
+                    - "ticket_events"
+                    - "sentiments"
+                    - "escalations"
+                  pipeline_duration_seconds: 225.5
+                  total_token_usage: 15200
+                  steps:
+                    - step: "requirement_intake"
+                      status: "completed"
+                      duration_ms: 12000
+                      token_usage: 2500
+                    - step: "data_model_inference"
+                      status: "completed"
+                      duration_ms: 8000
+                      token_usage: 3200
+                    - step: "schema_provisioning"
+                      status: "completed"
+                      duration_ms: 3500
+                      token_usage: 0
+                    - step: "seed_data_generation"
+                      status: "completed"
+                      duration_ms: 15000
+                      token_usage: 4100
+                    - step: "frontend_generation"
+                      status: "completed"
+                      duration_ms: 20000
+                      token_usage: 2800
+                    - step: "backend_generation"
+                      status: "completed"
+                      duration_ms: 18000
+                      token_usage: 2600
+                    - step: "deployment_config"
+                      status: "completed"
+                      duration_ms: 1000
+                      token_usage: 0
+                    - step: "validation"
+                      status: "completed"
+                      duration_ms: 2000
+                      token_usage: 0
+                    - step: "workspace_write"
+                      status: "completed"
+                      duration_ms: 5000
+                      token_usage: 0
+                    - step: "app_deployment"
+                      status: "completed"
+                      duration_ms: 120000
+                      token_usage: 0
+                    - step: "permission_grant"
+                      status: "completed"
+                      duration_ms: 3000
+                      token_usage: 0
+                    - step: "audit"
+                      status: "completed"
+                      duration_ms: 500
+                      token_usage: 0
+                  created_at: "2026-05-05T10:00:00Z"
+                  updated_at: "2026-05-05T10:03:45Z"
+        '404':
+          description: Project not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse'
+              example:
+                success: false
+                statusCode: 404
+                message: "Project with ID 550e8400-e29b-41d4-a716-446655440000 not found"
+                data: null
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse'
+              example:
+                success: false
+                statusCode: 500
+                message: "An unexpected error occurred. Please try again later."
+                data: null
+
+  # ═══════════════════════════════════════════════════════════════════
+  # HEALTH ENDPOINTS
+  # ═══════════════════════════════════════════════════════════════════
+
+  /health:
+    get:
+      operationId: healthCheck
+      tags: [Health]
+      summary: Health check (liveness probe)
+      description: Returns healthy status if the application is running.
+      responses:
+        '200':
+          description: Application is healthy
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthApiResponse'
+              example:
+                success: true
+                statusCode: 200
+                message: "Service is healthy"
+                data:
+                  status: "healthy"
+                  version: "1.0.0"
+
+  /ready:
+    get:
+      operationId: readinessCheck
+      tags: [Health]
+      summary: Readiness check (readiness probe)
+      description: |
+        Checks connectivity to Lakebase and Model Serving endpoint readiness.
+        Returns 200 if all dependencies are available, 503 otherwise.
+      responses:
+        '200':
+          description: All dependencies are ready
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReadinessApiResponse'
+              example:
+                success: true
+                statusCode: 200
+                message: "All dependencies ready"
+                data:
+                  status: "ready"
+                  checks:
+                    lakebase: "connected"
+                    model_serving: "ready"
+        '503':
+          description: One or more dependencies are unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReadinessApiResponse'
+              example:
+                success: false
+                statusCode: 503
+                message: "One or more dependencies are unavailable"
+                data:
+                  status: "not_ready"
+                  checks:
+                    lakebase: "connected"
+                    model_serving: "unavailable"
+
+# ═══════════════════════════════════════════════════════════════════════
+# COMPONENTS
+# ═══════════════════════════════════════════════════════════════════════
+
+components:
+  schemas:
+
+    # ─── Standard Response Envelope ──────────────────────────────────
+
+    ApiResponse:
+      type: object
+      required: [success, statusCode, message, data]
+      description: Standard API response envelope used by all JSON endpoints.
+      properties:
+        success:
+          type: boolean
+          description: Whether the request was successful.
+        statusCode:
+          type: integer
+          description: HTTP status code.
+        message:
+          type: string
+          description: Human-readable message.
+        data:
+          description: Response payload (null on error).
+          nullable: true
+
+    # ─── Request Schemas ─────────────────────────────────────────────
+
+    GreenfieldPipelineRequest:
+      type: object
+      required: [type, prompt]
+      properties:
+        type:
+          type: string
+          enum: [greenfield]
+          description: Pipeline mode — must be `greenfield`.
+          example: "greenfield"
+        prompt:
+          type: string
+          minLength: 1
+          maxLength: 10000
+          description: Natural-language business prompt describing the application to build.
+          example: "Build a customer service copilot app that stores customer profiles, support tickets, and escalation workflows."
+
+    BrownfieldPipelineRequest:
+      type: object
+      required: [type, prompt, files]
+      properties:
+        type:
+          type: string
+          enum: [brownfield]
+          description: Pipeline mode — must be `brownfield`.
+          example: "brownfield"
+        prompt:
+          type: string
+          minLength: 1
+          maxLength: 10000
+          description: Description of the existing prototype or context for the migration.
+          example: "Migrate this logistics scorecard application to production."
+        files:
+          type: array
+          items:
+            type: string
+            format: binary
+          description: |
+            One or more binary files (zip archives, images, PDFs) representing the existing prototype.
+            The backend will upload these to a Databricks Volume for processing.
+            Supported formats: .zip, .pdf, .png, .jpg, .jpeg
+            Max file size: 5MB per file.
+
+    # ─── SSE Event Schema ────────────────────────────────────────────
+
+    SSEEvent:
+      type: object
+      description: |
+        A single Server-Sent Event payload (the `data:` field in the SSE stream).
+        The `event:` line contains the event_type.
+      properties:
+        step:
+          type: string
+          nullable: true
+          description: Pipeline step identifier. Null for `pipeline_complete` events.
+          enum:
+            - requirement_intake
+            - prototype_ingestion
+            - data_model_inference
+            - schema_provisioning
+            - seed_data_generation
+            - frontend_generation
+            - backend_generation
+            - deployment_config
+            - validation
+            - workspace_write
+            - app_deployment
+            - permission_grant
+            - audit
+        status:
+          type: string
+          enum: [running, completed, failed]
+          description: Current status of the step or pipeline.
+        message:
+          type: string
+          description: Human-readable progress message.
+        data:
+          type: object
+          additionalProperties: true
+          description: |
+            Step-specific payload.
+
+            **On `step_completed`:** Contains step results (entity_count, table_count, row_counts, etc.)
+
+            **On `pipeline_complete` (success):**
+            - `app_url` — Deployed Databricks App URL
+            - `app_name` — App display name
+            - `schema_name` — Lakebase schema created
+            - `catalog` — Unity Catalog name
+            - `tables_created` — List of table names
+            - `completed_steps` — All steps that completed
+            - `pipeline_duration_seconds` — Total execution time
+
+            **On `pipeline_complete` (failure):**
+            - `error_code` — Machine-readable error code
+            - `failed_step` — Step where pipeline failed
+            - `completed_steps` — Steps that completed before failure
+        timestamp:
+          type: string
+          format: date-time
+          description: ISO 8601 timestamp of the event.
+
+    # ─── Project Schemas ─────────────────────────────────────────────
+
+    ProjectSummary:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        project_name:
+          type: string
+        type:
+          type: string
+          enum: [greenfield, brownfield]
+        status:
+          type: string
+          enum: [pending, in_progress, completed, failed]
+        prompt_preview:
+          type: string
+          description: First 100 characters of the original prompt.
+        app_url:
+          type: string
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+
+    ProjectDetail:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        project_name:
+          type: string
+        type:
+          type: string
+          enum: [greenfield, brownfield]
+        status:
+          type: string
+          enum: [pending, in_progress, completed, failed]
+        prompt:
+          type: string
+          description: Full original prompt.
+        app_name:
+          type: string
+          nullable: true
+        app_url:
+          type: string
+          nullable: true
+        schema_name:
+          type: string
+          nullable: true
+        catalog:
+          type: string
+          nullable: true
+        tables_created:
+          type: array
+          items:
+            type: string
+        pipeline_duration_seconds:
+          type: number
+          nullable: true
+        total_token_usage:
+          type: integer
+          nullable: true
+        volume_paths:
+          type: array
+          items:
+            type: string
+          nullable: true
+          description: Databricks Volume paths where uploaded files were stored (brownfield only).
+        steps:
+          type: array
+          items:
+            $ref: '#/components/schemas/PipelineStepDetail'
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    PipelineStepDetail:
+      type: object
+      properties:
+        step:
+          type: string
+        status:
+          type: string
+          enum: [pending, running, completed, failed, skipped]
+        duration_ms:
+          type: integer
+          nullable: true
+        token_usage:
+          type: integer
+          nullable: true
+        error_message:
+          type: string
+          nullable: true
+        error_code:
+          type: string
+          nullable: true
+
+    ProjectListData:
+      type: object
+      properties:
+        projects:
+          type: array
+          items:
+            $ref: '#/components/schemas/ProjectSummary'
+        total:
+          type: integer
+        limit:
+          type: integer
+        offset:
+          type: integer
+
+    # ─── Health Schemas ──────────────────────────────────────────────
+
+    HealthData:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [healthy]
+        version:
+          type: string
+
+    ReadinessData:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [ready, not_ready]
+        checks:
+          type: object
+          properties:
+            lakebase:
+              type: string
+              enum: [connected, unavailable]
+            model_serving:
+              type: string
+              enum: [ready, unavailable]
+
+    # ─── Typed API Responses (envelope + data) ───────────────────────
+
+    ProjectListApiResponse:
+      allOf:
+        - $ref: '#/components/schemas/ApiResponse'
+        - type: object
+          properties:
+            data:
+              $ref: '#/components/schemas/ProjectListData'
+
+    ProjectDetailApiResponse:
+      allOf:
+        - $ref: '#/components/schemas/ApiResponse'
+        - type: object
+          properties:
+            data:
+              $ref: '#/components/schemas/ProjectDetail'
+
+    HealthApiResponse:
+      allOf:
+        - $ref: '#/components/schemas/ApiResponse'
+        - type: object
+          properties:
+            data:
+              $ref: '#/components/schemas/HealthData'
+
+    ReadinessApiResponse:
+      allOf:
+        - $ref: '#/components/schemas/ApiResponse'
+        - type: object
+          properties:
+            data:
+              $ref: '#/components/schemas/ReadinessData'
