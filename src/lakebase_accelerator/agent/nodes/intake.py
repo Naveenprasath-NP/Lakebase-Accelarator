@@ -11,6 +11,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 
 from lakebase_accelerator.agent.llm import get_llm
 from lakebase_accelerator.agent.state import PipelineState
+from lakebase_accelerator.utils.json_repair import parse_llm_json
 from lakebase_accelerator.utils.logger import logger
 
 INTAKE_SYSTEM_PROMPT = """You are a business analyst. Analyze the user's prompt and extract application requirements.
@@ -49,7 +50,7 @@ def intake_node(state: PipelineState) -> dict:
     """Analyze the user prompt and extract structured requirements."""
     logger.info("Node: intake_agent — analyzing prompt", extra={"step": "intake"})
 
-    llm = get_llm(max_tokens=4096)
+    llm = get_llm(max_tokens=8192)
 
     response = llm.invoke(
         [
@@ -60,19 +61,24 @@ def intake_node(state: PipelineState) -> dict:
 
     # Parse the JSON response
     try:
-        result = _parse_json(response.content)
+        result = parse_llm_json(response.content)
     except (json.JSONDecodeError, ValueError) as e:
         logger.warning(f"Intake agent returned invalid JSON, retrying: {e}")
-        # Retry once
-        response = llm.invoke(
+        # Retry once with higher token limit
+        llm_retry = get_llm(max_tokens=16384)
+        response = llm_retry.invoke(
             [
                 SystemMessage(content=INTAKE_SYSTEM_PROMPT),
                 HumanMessage(
-                    content=f"Analyze this prompt and extract entities. Return ONLY valid JSON:\n\n{state['prompt']}"
+                    content=f"Analyze this prompt and extract entities. Return ONLY valid JSON, keep it concise:\n\n{state['prompt']}"
                 ),
             ]
         )
-        result = _parse_json(response.content)
+        try:
+            result = parse_llm_json(response.content)
+        except (json.JSONDecodeError, ValueError) as e2:
+            logger.error(f"Intake agent failed after retry: {e2}")
+            result = {"is_sufficient": False, "clarification_questions": ["Could you provide more details about your application?"], "entities": [], "relationships": [], "project_name": "unnamed-project"}
 
     is_sufficient = result.get("is_sufficient", True)
     project_name = result.get("project_name", "unnamed-project")
@@ -97,13 +103,3 @@ def intake_node(state: PipelineState) -> dict:
     }
 
 
-def _parse_json(text: str) -> dict:
-    """Parse JSON from LLM response, handling markdown wrappers."""
-    text = text.strip()
-    if text.startswith("```json"):
-        text = text[7:]
-    elif text.startswith("```"):
-        text = text[3:]
-    if text.endswith("```"):
-        text = text[:-3]
-    return json.loads(text.strip())

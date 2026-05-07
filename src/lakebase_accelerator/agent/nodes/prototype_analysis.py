@@ -21,6 +21,7 @@ from lakebase_accelerator.agent.llm import get_llm
 from lakebase_accelerator.agent.state import PipelineState
 from lakebase_accelerator.services.dependencies import get_workspace_client
 from lakebase_accelerator.services.volume_reader_service import VolumeReaderService
+from lakebase_accelerator.utils.json_repair import parse_llm_json
 from lakebase_accelerator.utils.logger import logger
 
 PROTOTYPE_ANALYSIS_PROMPT = """You are a senior full-stack developer analyzing a prototype application.
@@ -129,7 +130,7 @@ async def prototype_analysis_node(state: PipelineState) -> dict:
 
     # 5. Parse response
     try:
-        result = _parse_json(response.content)
+        result = parse_llm_json(response.content)
     except (json.JSONDecodeError, ValueError) as e:
         logger.warning(f"Prototype analysis returned invalid JSON, retrying: {e}")
         response = llm.invoke(
@@ -139,7 +140,7 @@ async def prototype_analysis_node(state: PipelineState) -> dict:
             ]
         )
         try:
-            result = _parse_json(response.content)
+            result = parse_llm_json(response.content)
         except (json.JSONDecodeError, ValueError):
             logger.error("Prototype analysis failed to return valid JSON after retry")
             result = {}
@@ -230,15 +231,3 @@ def _build_prototype_context(result: dict) -> str:
         parts.append("")
 
     return "\n".join(parts)
-
-
-def _parse_json(text: str) -> dict:
-    """Parse JSON from LLM response, handling markdown wrappers."""
-    text = text.strip()
-    if text.startswith("```json"):
-        text = text[7:]
-    elif text.startswith("```"):
-        text = text[3:]
-    if text.endswith("```"):
-        text = text[:-3]
-    return json.loads(text.strip())

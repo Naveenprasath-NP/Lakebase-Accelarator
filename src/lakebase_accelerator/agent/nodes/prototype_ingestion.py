@@ -18,6 +18,7 @@ from lakebase_accelerator.agent.llm import get_llm
 from lakebase_accelerator.agent.state import PipelineState
 from lakebase_accelerator.services.dependencies import get_workspace_client
 from lakebase_accelerator.services.volume_reader_service import VolumeReaderService
+from lakebase_accelerator.utils.json_repair import parse_llm_json
 from lakebase_accelerator.utils.logger import logger
 
 PROTOTYPE_DATA_MODEL_PROMPT = """You are a database architect specializing in reverse engineering.
@@ -116,7 +117,7 @@ async def prototype_ingestion_node(state: PipelineState) -> dict:
     user_prompt = _build_user_prompt(state["prompt"], file_contents)
 
     # 3. Call LLM — focused ONLY on data model extraction
-    llm = get_llm(max_tokens=8192)
+    llm = get_llm(max_tokens=16384)
 
     response = llm.invoke(
         [
@@ -127,16 +128,25 @@ async def prototype_ingestion_node(state: PipelineState) -> dict:
 
     # 4. Parse JSON response
     try:
-        result = _parse_json(response.content)
+        result = parse_llm_json(response.content)
     except (json.JSONDecodeError, ValueError) as e:
         logger.warning(f"Prototype ingestion returned invalid JSON, retrying: {e}")
-        response = llm.invoke(
+        llm_retry = get_llm(max_tokens=8192)
+        response = llm_retry.invoke(
             [
                 SystemMessage(content=PROTOTYPE_DATA_MODEL_PROMPT),
-                HumanMessage(content=f"Return ONLY valid JSON. No markdown.\n\n{user_prompt}"),
+                HumanMessage(content=f"Return ONLY valid JSON. Keep it concise.\n\n{user_prompt}"),
             ]
         )
-        result = _parse_json(response.content)
+        try:
+            result = parse_llm_json(response.content)
+        except (json.JSONDecodeError, ValueError) as e2:
+            logger.error(f"Prototype ingestion failed after retry: {e2}")
+            return {
+                "error": f"Failed to parse prototype analysis: {str(e2)[:200]}",
+                "current_step": "prototype_ingestion",
+                "completed_steps": [],
+            }
 
     # 5. Extract results
     project_name = result.get("project_name", "unnamed-prototype")
@@ -176,14 +186,3 @@ def _build_user_prompt(prompt: str, file_contents: dict[str, str]) -> str:
 
     return "\n".join(parts)
 
-
-def _parse_json(text: str) -> dict:
-    """Parse JSON from LLM response, handling markdown wrappers."""
-    text = text.strip()
-    if text.startswith("```json"):
-        text = text[7:]
-    elif text.startswith("```"):
-        text = text[3:]
-    if text.endswith("```"):
-        text = text[:-3]
-    return json.loads(text.strip())

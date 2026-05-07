@@ -104,7 +104,7 @@ class Settings(BaseSettings):
     llm_temperature: float = 0.1
     """Default temperature for LLM calls."""
 
-    llm_max_tokens: int = 4096
+    llm_max_tokens: int = 8192
     """Default max tokens for LLM responses."""
 
     # ─── Connection Pool ─────────────────────────────────────────────
