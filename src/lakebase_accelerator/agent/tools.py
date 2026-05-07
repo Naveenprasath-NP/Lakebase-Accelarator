@@ -17,13 +17,28 @@ from lakebase_accelerator.utils.logger import logger
 # Module-level references (set during app startup via set_tool_dependencies)
 _lakebase_pool = None
 _settings = None
+_workspace_client = None
 
 
-def set_tool_dependencies(lakebase_pool, settings) -> None:
+def set_tool_dependencies(lakebase_pool, settings, workspace_client=None) -> None:
     """Set module-level dependencies for tools. Called once at app startup."""
-    global _lakebase_pool, _settings
+    global _lakebase_pool, _settings, _workspace_client
     _lakebase_pool = lakebase_pool
     _settings = settings
+    _workspace_client = workspace_client
+
+
+def _get_workspace_client():
+    """Get the Databricks workspace client instance."""
+    global _workspace_client
+    if _workspace_client is not None:
+        return _workspace_client
+
+    # Lazy initialization if not set during startup
+    from databricks.sdk import WorkspaceClient
+
+    _workspace_client = WorkspaceClient()
+    return _workspace_client
 
 
 def _get_repo():

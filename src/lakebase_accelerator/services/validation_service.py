@@ -5,7 +5,7 @@ before deployment. Catches issues early to avoid deployment failures.
 """
 
 from lakebase_accelerator.repositories.lakebase_repository import LakebaseRepository
-from lakebase_accelerator.settings import REQUIRED_APP_FILES
+from lakebase_accelerator.settings import REQUIRED_APP_FILES, REQUIRED_APP_FILES_POST_BUILD
 from lakebase_accelerator.utils.exceptions.exceptions import ValidationError
 from lakebase_accelerator.utils.logger import logger
 
@@ -70,7 +70,13 @@ class ValidationService:
             )
 
         # Check 4: Required files present
-        for required_file in REQUIRED_APP_FILES:
+        # Determine which file list to validate against:
+        # If frontend has been built (static/index.html exists), use post-build list.
+        # Otherwise, use the full source file list.
+        has_built_frontend = "static/index.html" in all_files
+        required_files = REQUIRED_APP_FILES_POST_BUILD if has_built_frontend else REQUIRED_APP_FILES
+
+        for required_file in required_files:
             checks.append(
                 ValidationCheck(
                     name=f"file_{required_file}",
