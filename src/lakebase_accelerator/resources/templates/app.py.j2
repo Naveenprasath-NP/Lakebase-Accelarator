@@ -6,6 +6,7 @@ Serves:
 - Health check at /health
 """
 
+import os
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -55,4 +56,9 @@ async def health_check():
 app.include_router(router)
 
 # Serve static frontend (must be LAST — catches all non-API paths)
-app.mount("/", StaticFiles(directory="static", html=True), name="static")
+# Ensure static directory exists to prevent startup crash
+STATIC_DIR = "static"
+if not os.path.isdir(STATIC_DIR):
+    os.makedirs(STATIC_DIR, exist_ok=True)
+
+app.mount("/", StaticFiles(directory=STATIC_DIR, html=True), name="static")

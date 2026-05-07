@@ -61,16 +61,13 @@ env:
 """
 
     def _generate_dockerfile(self) -> str:
-        """Generate multi-stage Dockerfile for React + FastAPI."""
-        return """# ─── Stage 1: Build React Frontend ───────────────────────────────
-FROM node:20-alpine AS frontend-build
-WORKDIR /app/frontend
-COPY frontend/package.json frontend/package-lock.json* ./
-RUN npm ci --production=false
-COPY frontend/ ./
-RUN npm run build
+        """Generate Dockerfile for FastAPI + pre-built React static files.
 
-# ─── Stage 2: Python Runtime ─────────────────────────────────────
+        Since the React frontend is built via a Databricks Job before deployment,
+        the Dockerfile only needs to set up the Python runtime and copy the
+        pre-built static files. No Node.js build stage needed.
+        """
+        return """# ─── Python Runtime with Pre-built Frontend ──────────────────────
 FROM python:3.11-slim
 WORKDIR /app
 
@@ -81,8 +78,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy backend code
 COPY backend/ ./
 
-# Copy built frontend from Stage 1
-COPY --from=frontend-build /app/frontend/dist ./static/
+# Copy pre-built frontend static files
+COPY static/ ./static/
 
 # Expose port and start
 EXPOSE 8000

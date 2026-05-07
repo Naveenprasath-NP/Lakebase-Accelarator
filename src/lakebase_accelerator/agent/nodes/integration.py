@@ -49,6 +49,8 @@ def integration_node(state: PipelineState) -> dict:
     bundle_files = dict(backend_files)
 
     # Add frontend static files
+    # Frontend files may already be prefixed with "static/" (from React build service)
+    # or may be raw paths (from static HTML fallback)
     for path, content in frontend_files.items():
         if not path.startswith("static/"):
             bundle_files[f"static/{path}"] = content

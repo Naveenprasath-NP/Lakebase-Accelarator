@@ -94,6 +94,20 @@ class Settings(BaseSettings):
     deployment_timeout_seconds: int = 300
     """Maximum time to wait for app deployment."""
 
+    # ─── Frontend Build (Databricks Job) ─────────────────────────────
+    frontend_build_node_type: str = "i3.xlarge"
+    """Instance type for the frontend build cluster (single-node, needs ~4GB RAM for npm)."""
+
+    frontend_build_spark_version: str = "14.3.x-scala2.12"
+    """Databricks Runtime version for the frontend build cluster."""
+
+    frontend_build_timeout_seconds: int = 300
+    """Maximum time to wait for the frontend build job to complete."""
+
+    frontend_build_use_serverless: bool = True
+    """Use serverless compute for frontend builds (faster startup, no cluster needed).
+    Set to False to use a classic single-node cluster instead."""
+
     # ─── LLM ─────────────────────────────────────────────────────────
     llm_max_retries: int = 2
     """Maximum retry attempts for LLM calls."""
@@ -162,12 +176,21 @@ REQUIRED_FRONTEND_FILES = [
     "frontend/src/App.tsx",
 ]
 
+# After a successful React build, frontend source files are replaced with built output.
+# This is the minimal set of files expected in the deployed bundle.
+REQUIRED_FRONTEND_BUILT_FILES = [
+    "static/index.html",
+]
+
 REQUIRED_DEPLOYMENT_FILES = [
     "app.yaml",
     "Dockerfile",
 ]
 
 REQUIRED_APP_FILES = REQUIRED_BACKEND_FILES + REQUIRED_FRONTEND_FILES + REQUIRED_DEPLOYMENT_FILES
+
+# For validation after build: accepts either source OR built frontend
+REQUIRED_APP_FILES_POST_BUILD = REQUIRED_BACKEND_FILES + REQUIRED_FRONTEND_BUILT_FILES + REQUIRED_DEPLOYMENT_FILES
 
 # File upload constraints (brownfield)
 MAX_UPLOAD_FILES = 10

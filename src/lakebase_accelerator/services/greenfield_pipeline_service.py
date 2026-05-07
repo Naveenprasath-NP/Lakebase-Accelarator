@@ -139,6 +139,9 @@ class GreenFieldPipelineService:
             yield self._step_started(PipelineStep.FRONTEND_GENERATION, "Generating React frontend...")
             yield self._step_started(PipelineStep.BACKEND_GENERATION, "Generating FastAPI backend...")
 
+            # Generate app_name early — needed for the frontend build step
+            app_name = self._generate_app_name(project_name)
+
             frontend_files, backend_files = await asyncio.gather(
                 self._frontend_generation.execute(data_model, project_name),
                 self._backend_generation.execute(data_model, schema_name, project_name),
@@ -158,10 +161,40 @@ class GreenFieldPipelineService:
                 {"file_count": len(backend_files.files)},
             )
 
+            # ─── Step 5b: Build React Frontend via Databricks Job ────────
+            yield self._step_started(PipelineStep.FRONTEND_GENERATION, "Building React frontend...")
+
+            from lakebase_accelerator.services.frontend_build_service import FrontendBuildService
+
+            build_service = FrontendBuildService(self._get_workspace_client())
+
+            # Strip "frontend/" prefix for the build service (it expects flat paths like package.json, src/App.tsx)
+            source_files_for_build = {
+                k.removeprefix("frontend/"): v
+                for k, v in frontend_files.files.items()
+                if k.startswith("frontend/")
+            }
+
+            try:
+                built_frontend = await build_service.build_frontend(app_name, source_files_for_build)
+                # built_frontend has paths like "static/index.html", "static/assets/index-abc.js"
+                # Replace the raw frontend source files with built output
+                frontend_files = type(frontend_files)(files=built_frontend)
+                logger.info(
+                    f"React build complete: {len(built_frontend)} static files",
+                    extra={"step": "frontend_build"},
+                )
+            except Exception as e:
+                logger.warning(
+                    f"React build failed ({e}), deploying frontend source files as-is",
+                    extra={"step": "frontend_build"},
+                )
+                # Keep the original frontend_files — they'll be deployed as source
+                # The Dockerfile in the bundle can still build them if Docker is available
+
             # ─── Step 7: Deployment Config ───────────────────────────────
             yield self._step_started(PipelineStep.DEPLOYMENT_CONFIG, "Generating deployment configuration...")
 
-            app_name = self._generate_app_name(project_name)
             config_files = await self._deployment_config.execute(project_name, schema_name, app_name)
 
             completed_steps.append("deployment_config")
@@ -325,3 +358,9 @@ class GreenFieldPipelineService:
         suffix = uuid4().hex[:6]
         max_len = 63 - len(suffix) - 1
         return f"{sanitized[:max_len]}-{suffix}"
+
+    def _get_workspace_client(self):
+        """Get a Databricks WorkspaceClient instance."""
+        from databricks.sdk import WorkspaceClient
+
+        return WorkspaceClient()

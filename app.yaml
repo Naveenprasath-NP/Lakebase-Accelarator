@@ -55,3 +55,13 @@ env:
   # ─── MLflow ─────────────────────────────────────────────────────
   - name: "MLFLOW_ENABLE_DB_SDK"
     value: "true"
+
+  # ─── Frontend Build (Databricks Job) ───────────────────────────
+  - name: "FRONTEND_BUILD_USE_SERVERLESS"
+    value: "true"
+  - name: "FRONTEND_BUILD_NODE_TYPE"
+    value: "i3.xlarge"
+  - name: "FRONTEND_BUILD_SPARK_VERSION"
+    value: "14.3.x-scala2.12"
+  - name: "FRONTEND_BUILD_TIMEOUT_SECONDS"
+    value: "300"
