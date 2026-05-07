@@ -29,6 +29,10 @@ class PipelineState(TypedDict):
     entities: list[dict]  # extracted entities with attributes
     relationships: list[dict]  # entity relationships
 
+    # ─── After Prototype Ingestion (brownfield only) ─────────────────
+    prototype_context: str  # summarized prototype: UI structure, features, tech stack
+    extracted_seed_data: dict  # actual data found in prototype: {table_name: [{col: val}]}
+
     # ─── After Data Model Agent ──────────────────────────────────────
     data_model: dict  # full DDL-ready model (tables, columns, FKs, indexes, creation_order)
 

@@ -40,29 +40,33 @@ Rules:
 
 
 def frontend_dev_node(state: PipelineState) -> dict:
-    """Generate frontend as static HTML (no React build needed).
+    """Generate frontend as static HTML.
 
-    Uses backend_files from state to extract the exact API contract,
-    ensuring frontend calls match backend routes perfectly.
+    For brownfield: uses prototype_context to replicate the original UI faithfully.
+    For greenfield: generates a generic CRUD interface.
 
     NOTE: React build is disabled because:
     1. Node.js runtime is not available in Databricks Apps deployment environment
     2. The generated app uses a flat structure without Dockerfile (no multi-stage build)
     3. Static HTML with Tailwind CDN + vanilla JS works perfectly for CRUD apps
-
-    TODO: Re-enable React build when Dockerfile-based deployment is implemented.
     """
     logger.info("Node: frontend_dev — generating static HTML", extra={"step": "frontend_dev"})
 
     data_model = state["data_model"]
     backend_files = state.get("backend_files", {})
     entities_summary = _summarize_entities(data_model)
+    pipeline_type = state.get("pipeline_type", "greenfield")
+    prototype_context = state.get("prototype_context", "")
 
     # Extract API contract from the actual backend route files
     api_contract = _extract_api_contract(backend_files, data_model)
 
-    # Generate a static HTML page with the exact API contract
-    frontend_files = _generate_static_fallback(entities_summary, data_model, api_contract)
+    if pipeline_type == "brownfield" and prototype_context:
+        # Brownfield: generate frontend based on prototype's actual UI
+        frontend_files = _generate_brownfield_frontend(entities_summary, data_model, api_contract, prototype_context)
+    else:
+        # Greenfield: generate generic CRUD frontend
+        frontend_files = _generate_static_fallback(entities_summary, data_model, api_contract)
 
     logger.info(f"Frontend complete: {len(frontend_files)} static files", extra={"step": "frontend_dev"})
 
@@ -182,6 +186,87 @@ def _try_build_frontend(app_name: str, source_files: dict[str, str]) -> dict[str
     except Exception as e:
         logger.warning(f"Frontend build error: {e}")
         return None
+
+
+def _generate_brownfield_frontend(
+    entities_summary: str, data_model: dict, api_contract: str, prototype_context: str
+) -> dict[str, str]:
+    """Generate frontend that replicates the prototype's UI faithfully.
+
+    Uses the prototype_context (UI description, features, layout) to build
+    a production-quality frontend that matches the original prototype's
+    look and functionality, not just generic CRUD.
+    """
+    llm = get_llm(max_tokens=16384)
+
+    tables = data_model.get("tables", [])
+    api_routes = []
+    for table in tables:
+        entity_name = table["name"]
+        entity_plural = entity_name if entity_name.endswith("s") else f"{entity_name}s"
+        cols = [c for c in table.get("columns", []) if c["name"] not in ("id", "created_at", "updated_at")]
+        col_names = [c["name"] for c in cols]
+        api_routes.append(
+            f"  - Entity: {entity_name}\n"
+            f"    API prefix: /api/{entity_plural}\n"
+            f"    Fields: {', '.join(col_names)}\n"
+            f"    Endpoints: GET /api/{entity_plural}, POST /api/{entity_plural}, "
+            f"GET /api/{entity_plural}/{{id}}, PUT /api/{entity_plural}/{{id}}, DELETE /api/{entity_plural}/{{id}}"
+        )
+    api_info = "\n".join(api_routes)
+
+    response = llm.invoke(
+        [
+            SystemMessage(
+                content="""You are a senior frontend developer. Generate a COMPLETE single-page HTML application that REPLICATES the prototype described below.
+
+This is a BROWNFIELD migration — the goal is to recreate the prototype's UI and functionality at production quality, NOT to create a generic CRUD interface.
+
+CRITICAL REQUIREMENTS:
+- Replicate the prototype's ACTUAL UI layout, pages, navigation, and interactions
+- Use Tailwind CSS via CDN for styling
+- Use vanilla JavaScript (no framework needed for static HTML)
+- Use fetch() for ALL API calls to the backend
+- API calls must use the EXACT paths provided
+- Include ALL features described in the prototype (dashboards, charts, forms, lists, etc.)
+- If the prototype has charts/visualizations, use Chart.js via CDN
+- If the prototype has tabs/navigation, replicate that structure
+- Make it responsive and production-quality
+- Include proper loading states, error handling, and empty states
+- Return ONLY the complete HTML file, no markdown fences
+
+The generated HTML should look and behave like the original prototype, just backed by the new API."""
+            ),
+            HumanMessage(
+                content=f"""## Prototype Context (replicate this UI faithfully)
+{prototype_context}
+
+## Data Model (entities available via API)
+{entities_summary}
+
+## EXACT API Routes (use these paths)
+{api_info}
+
+## Backend API Contract
+{api_contract}
+
+IMPORTANT:
+- Recreate the prototype's UI — don't just make generic CRUD tables
+- If the prototype has a dashboard, build a dashboard
+- If it has specific workflows or multi-step forms, replicate them
+- Use the same visual style/approach described in the prototype context
+- All API calls use relative paths (same origin)
+- POST/PUT bodies include all fields EXCEPT id, created_at, updated_at
+- IDs are UUID strings"""
+            ),
+        ]
+    )
+
+    html_content = _strip_markdown(response.content)
+
+    return {
+        "static/index.html": html_content,
+    }
 
 
 def _generate_static_fallback(entities_summary: str, data_model: dict, api_contract: str) -> dict[str, str]:

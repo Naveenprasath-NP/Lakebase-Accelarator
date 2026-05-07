@@ -29,7 +29,11 @@ Rules:
 
 
 def seed_data_node(state: PipelineState) -> dict:
-    """Generate and insert seed data for all tables."""
+    """Generate and insert seed data for all tables.
+
+    For brownfield: uses extracted_seed_data from prototype when available.
+    For greenfield (or missing data): generates mock data via LLM.
+    """
     logger.info("Node: seed_data_agent — generating data", extra={"step": "seed_data"})
 
     repo = _get_repo()
@@ -38,6 +42,16 @@ def seed_data_node(state: PipelineState) -> dict:
     data_model = state["data_model"]
     creation_order = data_model.get("creation_order", [])
     tables = data_model.get("tables", [])
+
+    # Brownfield: check for extracted seed data from prototype
+    extracted_seed_data = state.get("extracted_seed_data", {})
+    pipeline_type = state.get("pipeline_type", "greenfield")
+
+    if extracted_seed_data and pipeline_type == "brownfield":
+        logger.info(
+            f"Using extracted seed data from prototype for {len(extracted_seed_data)} tables",
+            extra={"step": "seed_data"},
+        )
 
     # Build table lookup
     table_map = {t["name"]: t for t in tables}
@@ -53,25 +67,39 @@ def seed_data_node(state: PipelineState) -> dict:
 
         logger.info(f"Generating seed data for: {table_name}", extra={"step": "seed_data"})
 
-        # Build context for this table
-        context = _build_table_context(table_def, inserted_pks)
+        # Check if we have extracted data for this table (brownfield)
+        extracted_rows = extracted_seed_data.get(table_name, [])
 
-        try:
-            response = llm.invoke(
-                [
-                    SystemMessage(content=SEED_DATA_PROMPT),
-                    HumanMessage(content=context),
-                ]
+        if extracted_rows and isinstance(extracted_rows, list) and len(extracted_rows) > 0:
+            # Use actual data from the prototype
+            logger.info(
+                f"Using {len(extracted_rows)} extracted rows for {table_name}",
+                extra={"step": "seed_data"},
             )
+            rows = extracted_rows
+        else:
+            # Generate mock data via LLM
+            context = _build_table_context(table_def, inserted_pks)
 
-            rows = _parse_json_array(response.content)
+            try:
+                response = llm.invoke(
+                    [
+                        SystemMessage(content=SEED_DATA_PROMPT),
+                        HumanMessage(content=context),
+                    ]
+                )
+                rows = _parse_json_array(response.content)
+            except Exception as e:
+                logger.warning(f"LLM seed data generation failed for {table_name}: {e}")
+                rows = []
 
-            if not rows:
-                logger.warning(f"No rows generated for {table_name}")
-                row_counts[table_name] = 0
-                continue
+        if not rows:
+            logger.warning(f"No rows available for {table_name}")
+            row_counts[table_name] = 0
+            continue
 
-            # Insert rows
+        # Insert rows
+        try:
             count = repo.insert_seed_data(schema_name, table_name, rows)
             row_counts[table_name] = count
 
@@ -84,7 +112,7 @@ def seed_data_node(state: PipelineState) -> dict:
 
         except Exception as e:
             error_msg = str(e)[:200]
-            logger.warning(f"Seed data failed for {table_name}: {error_msg}", extra={"step": "seed_data"})
+            logger.warning(f"Seed data insert failed for {table_name}: {error_msg}", extra={"step": "seed_data"})
             row_counts[table_name] = 0
 
     logger.info(f"Seed data complete: {sum(row_counts.values())} total rows", extra={"step": "seed_data"})

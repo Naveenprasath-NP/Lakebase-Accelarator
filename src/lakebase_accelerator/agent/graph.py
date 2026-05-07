@@ -1,10 +1,13 @@
 """Orchestrator Graph — LangGraph StateGraph connecting all pipeline nodes.
 
 Sequential flow with conditional routing and self-healing deployment retry:
-intake → (sufficient?) → data_model → schema → seed_data → backend → frontend
-      → integration → (valid?) → deployment → (success?) → END
-                                      ↓ (failed, retries left)
-                                  backend_dev (fix) → frontend_dev → integration → deployment
+
+Greenfield: intake → (sufficient?) → data_model → schema → seed_data → backend → frontend
+                  → integration → (valid?) → deployment → (success?) → END
+
+Brownfield: prototype_ingestion → (sufficient?) → data_model → ... (same as above)
+
+Self-healing: deployment failure routes back to backend_dev for fix attempts.
 """
 
 from typing import Literal
@@ -17,16 +20,32 @@ from lakebase_accelerator.agent.nodes.deployment import deployment_node
 from lakebase_accelerator.agent.nodes.frontend_dev import frontend_dev_node
 from lakebase_accelerator.agent.nodes.intake import intake_node
 from lakebase_accelerator.agent.nodes.integration import integration_node
+from lakebase_accelerator.agent.nodes.prototype_analysis import prototype_analysis_node
+from lakebase_accelerator.agent.nodes.prototype_ingestion import prototype_ingestion_node
 from lakebase_accelerator.agent.nodes.schema_provisioning import schema_provisioning_node
 from lakebase_accelerator.agent.nodes.seed_data import seed_data_node
 from lakebase_accelerator.agent.state import PipelineState
 from lakebase_accelerator.utils.logger import logger
 
 
+def _route_start(state: PipelineState) -> Literal["intake", "prototype_ingestion"]:
+    """Route at START: greenfield goes to intake, brownfield goes to prototype ingestion."""
+    if state.get("pipeline_type") == "brownfield":
+        return "prototype_ingestion"
+    return "intake"
+
+
 def _route_after_intake(state: PipelineState) -> Literal["design_model", "__end__"]:
-    """Route after intake: proceed if sufficient, end if not."""
+    """Route after intake/prototype_ingestion: proceed if sufficient, end if not."""
     if state.get("is_sufficient", True):
         return "design_model"
+    return END
+
+
+def _route_after_prototype_ingestion(state: PipelineState) -> Literal["prototype_analysis", "__end__"]:
+    """Route after prototype_ingestion: proceed to analysis if sufficient, end if not."""
+    if state.get("is_sufficient", True):
+        return "prototype_analysis"
     return END
 
 
@@ -79,19 +98,27 @@ def _route_after_deployment(state: PipelineState) -> Literal["backend_dev", "__e
 
 
 def build_pipeline_graph() -> StateGraph:
-    """Build the full orchestrator graph with self-healing deployment retry.
+    """Build the full orchestrator graph with brownfield support and self-healing.
 
     Flow:
-    START → intake → (sufficient?) → data_model → schema_provisioning
-          → seed_data → backend_dev → frontend_dev → integration
-          → (valid?) → deployment → (success?) → END
-                                  ↓ (failed)
-                              backend_dev → frontend_dev → integration → deployment (retry)
+    Greenfield:
+      START → intake → (sufficient?) → design_model → schema → seed_data
+            → backend_dev → frontend_dev → integration → deployment → END
+
+    Brownfield:
+      START → prototype_ingestion → (sufficient?) → prototype_analysis
+            → design_model → schema → seed_data → backend_dev → frontend_dev
+            → integration → deployment → END
+
+    Self-healing:
+      deployment failure → backend_dev → frontend_dev → integration → deployment (retry)
     """
     builder = StateGraph(PipelineState)
 
     # Add all nodes
     builder.add_node("intake", intake_node)
+    builder.add_node("prototype_ingestion", prototype_ingestion_node)
+    builder.add_node("prototype_analysis", prototype_analysis_node)
     builder.add_node("design_model", data_model_node)
     builder.add_node("schema_provisioning", schema_provisioning_node)
     builder.add_node("seed_data", seed_data_node)
@@ -100,9 +127,17 @@ def build_pipeline_graph() -> StateGraph:
     builder.add_node("integration", integration_node)
     builder.add_node("deployment", deployment_node)
 
-    # Define edges
-    builder.add_edge(START, "intake")
+    # ─── Entry routing ───────────────────────────────────────────────
+    builder.add_conditional_edges(START, _route_start, ["intake", "prototype_ingestion"])
+
+    # ─── Greenfield path ─────────────────────────────────────────────
     builder.add_conditional_edges("intake", _route_after_intake, ["design_model", END])
+
+    # ─── Brownfield path (two-step ingestion) ────────────────────────
+    builder.add_conditional_edges("prototype_ingestion", _route_after_prototype_ingestion, ["prototype_analysis", END])
+    builder.add_edge("prototype_analysis", "design_model")
+
+    # ─── Shared pipeline (both paths converge here) ──────────────────
     builder.add_edge("design_model", "schema_provisioning")
     builder.add_edge("schema_provisioning", "seed_data")
     builder.add_edge("seed_data", "backend_dev")
@@ -113,7 +148,7 @@ def build_pipeline_graph() -> StateGraph:
     # Self-healing: deployment can route back to backend_dev or end
     builder.add_conditional_edges("deployment", _route_after_deployment, ["backend_dev", END])
 
-    logger.info("Pipeline graph built successfully (with self-healing deployment retry)")
+    logger.info("Pipeline graph built (greenfield + brownfield multi-step + self-healing)")
     return builder.compile()
 
 

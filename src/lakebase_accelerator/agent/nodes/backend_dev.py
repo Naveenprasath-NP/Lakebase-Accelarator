@@ -175,12 +175,24 @@ def _generate_backend(state: PipelineState) -> dict:
     # Get the reference template so LLM knows the exact pattern
     reference_route = _generate_route_from_template(tables[0]) if tables else ""
 
+    # For brownfield: include prototype context so LLM can add custom endpoints
+    prototype_context = state.get("prototype_context", "")
+    brownfield_prompt = prompt
+    if prototype_context and state.get("pipeline_type") == "brownfield":
+        brownfield_prompt = (
+            f"{prompt}\n\n"
+            f"## PROTOTYPE CONTEXT (replicate this backend functionality):\n"
+            f"{prototype_context}\n\n"
+            f"IMPORTANT: Generate endpoints that match the prototype's API structure and business logic. "
+            f"Don't just create basic CRUD — replicate the prototype's actual functionality."
+        )
+
     # Generate routes using LLM with template context
     extra_requirements = []
     for table in tables:
         file_path = f"src/routes/{table['name']}.py"
         logger.info(f"Generating: {file_path}", extra={"step": "backend_dev"})
-        content, deps = _generate_route_with_llm(table, data_model, prompt, reference_route, data_model_summary)
+        content, deps = _generate_route_with_llm(table, data_model, brownfield_prompt, reference_route, data_model_summary)
         backend_files[file_path] = content
         extra_requirements.extend(deps)
 
