@@ -22,6 +22,7 @@ from lakebase_accelerator.services.requirement_intake_service import Requirement
 from lakebase_accelerator.services.schema_provisioning_service import SchemaProvisioningService
 from lakebase_accelerator.services.seed_data_service import SeedDataService
 from lakebase_accelerator.services.validation_service import ValidationService
+from lakebase_accelerator.services.volume_reader_service import VolumeReaderService
 from lakebase_accelerator.services.volume_upload_service import VolumeUploadService
 from lakebase_accelerator.settings import get_settings
 
@@ -166,6 +167,11 @@ def get_audit_service() -> AuditService:
 def get_volume_upload_service() -> VolumeUploadService:
     """Create VolumeUploadService with volume repository."""
     return VolumeUploadService(volume_repo=get_volume_repository())
+
+
+def get_volume_reader_service() -> VolumeReaderService:
+    """Create VolumeReaderService with workspace client."""
+    return VolumeReaderService(workspace_client=get_workspace_client())
 
 
 # ─── Pipeline factory ────────────────────────────────────────────────

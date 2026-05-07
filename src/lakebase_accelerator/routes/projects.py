@@ -106,6 +106,8 @@ async def execute_pipeline(
         "clarification_questions": [],
         "entities": [],
         "relationships": [],
+        "prototype_context": "",
+        "extracted_seed_data": {},
         "data_model": {},
         "schema_name": "",
         "table_names": [],
@@ -313,8 +315,11 @@ async def get_project_detail(project_id: str) -> JSONResponse:
 
 def _extract_step_data(node_name: str, update: dict) -> dict:
     """Extract relevant data from a node update for SSE."""
-    if node_name == "intake":
+    if node_name in ("intake", "prototype_ingestion"):
         return {"entities": len(update.get("entities", [])), "relationships": len(update.get("relationships", []))}
+    if node_name == "prototype_analysis":
+        seed_data = update.get("extracted_seed_data", {})
+        return {"seed_tables": len(seed_data), "context_length": len(update.get("prototype_context", ""))}
     if node_name == "data_model":
         dm = update.get("data_model", {})
         return {"tables": len(dm.get("tables", []))}
@@ -337,6 +342,8 @@ def _step_message(node_name: str, update: dict) -> str:
     """Generate a human-readable message for a completed step."""
     messages = {
         "intake": f"Analyzed prompt: {len(update.get('entities', []))} entities found",
+        "prototype_ingestion": f"Reverse-engineered data model: {len(update.get('entities', []))} entities found",
+        "prototype_analysis": f"Analyzed prototype: extracted seed data and UI context",
         "data_model": f"Designed data model: {len(update.get('data_model', {}).get('tables', []))} tables",
         "schema_provisioning": f"Created schema: {update.get('schema_name', '')}",
         "seed_data": f"Inserted seed data: {sum(update.get('seed_row_counts', {}).values())} rows",
