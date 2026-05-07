@@ -184,17 +184,20 @@ class LakebaseRepository:
             self._return_connection(conn)
 
     def execute_query(self, schema_name: str, query: str, params: tuple | None = None) -> list[dict]:
-        """Execute a parameterized SELECT query. Returns list of dicts."""
+        """Execute a parameterized query. Returns list of dicts for queries with results."""
         conn = self._get_connection()
         try:
             with conn.cursor(cursor_factory=extras.RealDictCursor) as cur:
                 cur.execute(sql.SQL("SET search_path TO {}").format(sql.Identifier(schema_name)))
                 cur.execute(query, params)
-                # Only fetch results for SELECT queries
+                # Fetch results if the query returns rows (SELECT, INSERT...RETURNING, etc.)
                 if cur.description is not None:
-                    return [dict(row) for row in cur.fetchall()]
+                    rows = [dict(row) for row in cur.fetchall()]
+                else:
+                    rows = []
+                # Always commit — handles INSERT, UPDATE, DELETE, and SELECT safely
                 conn.commit()
-                return []
+                return rows
         except Exception:
             conn.rollback()
             raise

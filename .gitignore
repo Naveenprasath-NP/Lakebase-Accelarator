@@ -32,6 +32,7 @@ Thumbs.db
 
 # Generated apps (output of pipeline runs)
 generated_apps/
+Fe/
 
 # Ruff cache
 .ruff_cache/

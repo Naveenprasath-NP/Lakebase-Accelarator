@@ -130,6 +130,24 @@ async def execute_pipeline(
 
     async def event_stream():
         """Stream SSE events as the pipeline graph executes."""
+        import time as _time
+
+        pipeline_start = _time.time()
+        project_id = None
+
+        # Create audit record at pipeline start
+        try:
+            audit = get_audit_service()
+            project_id = await audit.create_project_record(
+                project_name=project_name or "unnamed-project",
+                schema_name="",
+                mode=type,
+                prompt=prompt,
+            )
+            logger.info(f"Audit record created: {project_id}", extra={"step": "audit"})
+        except Exception as e:
+            logger.warning(f"Failed to create audit record: {e}")
+
         try:
             final_update = {}
 
@@ -162,7 +180,20 @@ async def execute_pipeline(
                         yield f"event: step_completed\ndata: {json.dumps(sse_data)}\n\n"
 
             # Pipeline complete — use the last update to determine outcome
+            pipeline_duration = _time.time() - pipeline_start
+
             if final_update.get("error"):
+                # Update audit: failed
+                if project_id:
+                    try:
+                        await audit.update_project_failed(
+                            project_id=project_id,
+                            failure_step=final_update.get("current_step", "unknown"),
+                            failure_message=final_update.get("error", "")[:500],
+                        )
+                    except Exception:
+                        pass
+
                 complete_data = {
                     "step": None,
                     "status": "failed",
@@ -183,6 +214,21 @@ async def execute_pipeline(
                     "timestamp": datetime.now(UTC).isoformat(),
                 }
             else:
+                # Update audit: completed
+                if project_id:
+                    try:
+                        await audit.update_project_completed(
+                            project_id=project_id,
+                            app_name=final_update.get("app_name", ""),
+                            app_url=final_update.get("app_url", ""),
+                            service_principal_id=final_update.get("service_principal_id", ""),
+                            tables_created=final_update.get("table_names", []),
+                            pipeline_duration_seconds=pipeline_duration,
+                            total_token_usage=0,
+                        )
+                    except Exception:
+                        pass
+
                 complete_data = {
                     "step": None,
                     "status": "completed",
@@ -194,6 +240,7 @@ async def execute_pipeline(
                         "catalog": "lakebase_accelerator_poc",
                         "tables_created": final_update.get("table_names", []),
                         "completed_steps": final_update.get("completed_steps", []),
+                        "pipeline_duration_seconds": round(pipeline_duration, 1),
                     },
                     "timestamp": datetime.now(UTC).isoformat(),
                 }
@@ -202,6 +249,18 @@ async def execute_pipeline(
 
         except Exception as e:
             logger.exception(f"Pipeline error: {e}")
+
+            # Update audit: failed
+            if project_id:
+                try:
+                    await audit.update_project_failed(
+                        project_id=project_id,
+                        failure_step="pipeline_error",
+                        failure_message=str(e)[:500],
+                    )
+                except Exception:
+                    pass
+
             error_data = {
                 "step": None,
                 "status": "failed",
@@ -250,14 +309,15 @@ async def list_projects(
                 status=PipelineStatus(row["status"]),
                 prompt_preview=row["prompt"][:100] if row.get("prompt") else "",
                 app_url=row.get("app_url"),
-                created_at=row["created_at"],
+                created_at=row["created_at"].isoformat() if hasattr(row["created_at"], "isoformat") else str(row["created_at"]),
             )
             for row in rows
         ]
         data = ProjectListData(projects=projects, total=total, limit=limit, offset=offset)
         resp = success_response(message="Projects retrieved successfully", data=data.model_dump())
         return JSONResponse(status_code=200, content=resp.model_dump())
-    except RuntimeError:
+    except RuntimeError as e:
+        logger.warning(f"RuntimeError in list_projects (likely pool not ready): {e}")
         data = ProjectListData(projects=[], total=0, limit=limit, offset=offset)
         resp = success_response(message="Projects retrieved successfully", data=data.model_dump())
         return JSONResponse(status_code=200, content=resp.model_dump())
@@ -273,7 +333,8 @@ async def get_project_detail(project_id: str) -> JSONResponse:
     try:
         audit = get_audit_service()
         row = await audit.get_project_detail(project_id)
-    except RuntimeError:
+    except RuntimeError as e:
+        logger.warning(f"RuntimeError in get_project_detail: {e}")
         row = None
     except Exception as e:
         logger.exception(f"Error: {e}")
@@ -301,8 +362,8 @@ async def get_project_detail(project_id: str) -> JSONResponse:
         pipeline_duration_seconds=row.get("pipeline_duration_seconds"),
         total_token_usage=row.get("total_token_usage"),
         steps=[],
-        created_at=row["created_at"],
-        updated_at=row.get("modified_at") or row["created_at"],
+        created_at=row["created_at"].isoformat() if hasattr(row["created_at"], "isoformat") else str(row["created_at"]),
+        updated_at=(row.get("modified_at") or row["created_at"]).isoformat() if hasattr((row.get("modified_at") or row["created_at"]), "isoformat") else str(row.get("modified_at") or row["created_at"]),
     )
     resp = success_response(message="Project retrieved successfully", data=data.model_dump())
     return JSONResponse(status_code=200, content=resp.model_dump())
