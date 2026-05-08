@@ -225,6 +225,7 @@ async def execute_pipeline(
                             tables_created=final_update.get("table_names", []),
                             pipeline_duration_seconds=pipeline_duration,
                             total_token_usage=0,
+                            schema_name=final_update.get("schema_name", ""),
                         )
                     except Exception:
                         pass
@@ -309,18 +310,20 @@ async def list_projects(
                 status=PipelineStatus(row["status"]),
                 prompt_preview=row["prompt"][:100] if row.get("prompt") else "",
                 app_url=row.get("app_url"),
+                schema_name=row.get("schema_name"),
+                tables_created=row.get("generated_tables") if isinstance(row.get("generated_tables"), list) else None,
                 created_at=row["created_at"].isoformat() if hasattr(row["created_at"], "isoformat") else str(row["created_at"]),
             )
             for row in rows
         ]
         data = ProjectListData(projects=projects, total=total, limit=limit, offset=offset)
-        resp = success_response(message="Projects retrieved successfully", data=data.model_dump())
-        return JSONResponse(status_code=200, content=resp.model_dump())
+        resp = success_response(message="Projects retrieved successfully", data=data.model_dump(mode='json'))
+        return JSONResponse(status_code=200, content=resp.model_dump(mode='json'))
     except RuntimeError as e:
         logger.warning(f"RuntimeError in list_projects (likely pool not ready): {e}")
         data = ProjectListData(projects=[], total=0, limit=limit, offset=offset)
-        resp = success_response(message="Projects retrieved successfully", data=data.model_dump())
-        return JSONResponse(status_code=200, content=resp.model_dump())
+        resp = success_response(message="Projects retrieved successfully", data=data.model_dump(mode='json'))
+        return JSONResponse(status_code=200, content=resp.model_dump(mode='json'))
     except Exception as e:
         logger.exception(f"Error listing projects: {e}")
         resp = error_response(message="An unexpected error occurred.", status_code=500)
@@ -339,11 +342,11 @@ async def get_project_detail(project_id: str) -> JSONResponse:
     except Exception as e:
         logger.exception(f"Error: {e}")
         resp = error_response(message="An unexpected error occurred.", status_code=500)
-        return JSONResponse(status_code=500, content=resp.model_dump())
+        return JSONResponse(status_code=500, content=resp.model_dump(mode='json'))
 
     if not row:
         resp = error_response(message=f"Project with ID {project_id} not found", status_code=404)
-        return JSONResponse(status_code=404, content=resp.model_dump())
+        return JSONResponse(status_code=404, content=resp.model_dump(mode='json'))
 
     from lakebase_accelerator.settings import get_settings as _get_settings
 
@@ -362,11 +365,11 @@ async def get_project_detail(project_id: str) -> JSONResponse:
         pipeline_duration_seconds=row.get("pipeline_duration_seconds"),
         total_token_usage=row.get("total_token_usage"),
         steps=[],
-        created_at=row["created_at"].isoformat() if hasattr(row["created_at"], "isoformat") else str(row["created_at"]),
-        updated_at=(row.get("modified_at") or row["created_at"]).isoformat() if hasattr((row.get("modified_at") or row["created_at"]), "isoformat") else str(row.get("modified_at") or row["created_at"]),
+        created_at=row["created_at"],
+        updated_at=row.get("modified_at") or row["created_at"],
     )
-    resp = success_response(message="Project retrieved successfully", data=data.model_dump())
-    return JSONResponse(status_code=200, content=resp.model_dump())
+    resp = success_response(message="Project retrieved successfully", data=data.model_dump(mode='json'))
+    return JSONResponse(status_code=200, content=resp.model_dump(mode='json'))
 
 
 # ═══════════════════════════════════════════════════════════════════════

@@ -56,6 +56,7 @@ class AuditService:
         tables_created: list[str],
         pipeline_duration_seconds: float,
         total_token_usage: int,
+        schema_name: str = "",
     ) -> None:
         """Update project record on successful completion."""
         logger.info(
@@ -70,6 +71,7 @@ class AuditService:
             SET status = 'completed',
                 app_name = %s,
                 app_url = %s,
+                schema_name = %s,
                 service_principal_id = %s,
                 generated_tables = %s::jsonb,
                 pipeline_duration_seconds = %s,
@@ -80,6 +82,7 @@ class AuditService:
             (
                 app_name,
                 app_url,
+                schema_name,
                 service_principal_id,
                 str(tables_created).replace("'", '"'),
                 pipeline_duration_seconds,
@@ -150,7 +153,8 @@ class AuditService:
         rows = self._repo.execute_query(
             ACCELERATOR_META_SCHEMA,
             f"""
-            SELECT id::text, project_name, mode, status, prompt, app_url, created_at
+            SELECT id::text, project_name, mode, status, prompt, app_url,
+                   schema_name, generated_tables, created_at
             FROM accelerator_meta.projects
             {where_clause}
             ORDER BY created_at DESC

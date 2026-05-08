@@ -68,7 +68,9 @@ class ProjectSummary(BaseModel):
     status: PipelineStatus
     prompt_preview: str
     app_url: str | None = None
-    created_at: datetime
+    schema_name: str | None = None
+    tables_created: list[str] | None = None
+    created_at: str
 
 
 class ProjectListData(BaseModel):
@@ -113,8 +115,8 @@ class ProjectDetailData(BaseModel):
     pipeline_duration_seconds: float | None = None
     total_token_usage: int | None = None
     steps: list[PipelineStepDetail] = Field(default_factory=list)
-    created_at: datetime
-    updated_at: datetime
+    created_at: str
+    updated_at: str
 
 
 # ─── Helper Functions ────────────────────────────────────────────────
