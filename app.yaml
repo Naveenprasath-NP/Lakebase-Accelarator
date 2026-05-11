@@ -1,67 +1,52 @@
 command:
-  - "bash"
-  - "-c"
+  - bash
+  - -c
   - "uv sync --all-extras && uv run uvicorn lakebase_accelerator.main:app --host 0.0.0.0 --port 8000"
 
 env:
-  # ─── Python Path (CRITICAL for src/ layout) ─────────────────────
-  - name: "PYTHONPATH"
+  - name: PYTHONPATH
     value: "/app/python/source_code/src"
-
-  # ─── Databricks Workspace ────────────────────────────────────────
-  - name: "DATABRICKS_HOST"
-    value-from: "lakebase-accelerator.databricks-host"
-  - name: "DATABRICKS_CLIENT_ID"
-    value-from: "lakebase-accelerator.databricks-client-id"
-  - name: "DATABRICKS_CLIENT_SECRET"
-    value-from: "lakebase-accelerator.databricks-client-secret"
-
-  # ─── Model Serving ──────────────────────────────────────────────
-  - name: "MODEL_SERVING_ENDPOINT"
-    value-from: "lakebase-accelerator.model-serving-endpoint"
-
-  # ─── Lakebase / Postgres ────────────────────────────────────────
-  - name: "POSTGRES_HOST"
-    value-from: "lakebase-accelerator.postgres-host"
-  - name: "POSTGRES_PORT"
-    value-from: "lakebase-accelerator.postgres-port"
-  - name: "POSTGRES_USER"
-    value-from: "lakebase-accelerator.postgres-user"
-  - name: "POSTGRES_DB"
-    value-from: "lakebase-accelerator.postgres-db"
-  - name: "POSTGRES_SCHEMA"
-    value-from: "lakebase-accelerator.postgres-schema"
-  - name: "LAKEBASE_ENDPOINT_NAME"
-    value-from: "lakebase-accelerator.lakebase-endpoint-name"
-
-  # ─── Application ────────────────────────────────────────────────
-  - name: "APP_NAME"
-    value-from: "lakebase-accelerator.app-name"
-  - name: "CATALOG_NAME"
-    value-from: "lakebase-accelerator.catalog-name"
-  - name: "DATABRICKS_CATALOG"
-    value-from: "lakebase-accelerator.databricks-catalog"
-  - name: "DATABRICKS_SCHEMA"
-    value-from: "lakebase-accelerator.databricks-schema"
-
-  # ─── Volume Storage (Brownfield) ────────────────────────────────
-  - name: "VOLUME_CATALOG"
-    value-from: "lakebase-accelerator.volume-catalog"
-  - name: "VOLUME_SCHEMA"
-    value-from: "lakebase-accelerator.volume-schema"
-  - name: "VOLUME_NAME"
-    value-from: "lakebase-accelerator.volume-name"
-
-  # ─── MLflow ─────────────────────────────────────────────────────
-  - name: "MLFLOW_ENABLE_DB_SDK"
+  - name: DATABRICKS_HOST
+    valueFrom: databricks_host
+  - name: DATABRICKS_CLIENT_ID
+    valueFrom: databricks_client_id
+  - name: DATABRICKS_CLIENT_SECRET
+    valueFrom: databricks_client_secret
+  - name: MODEL_SERVING_ENDPOINT
+    valueFrom: model_serving_endpoint
+  - name: POSTGRES_HOST
+    valueFrom: postgres_host
+  - name: POSTGRES_PORT
+    valueFrom: postgres_port
+  - name: POSTGRES_USER
+    valueFrom: postgres_user
+  - name: POSTGRES_DB
+    valueFrom: postgres_db
+  - name: POSTGRES_SCHEMA
+    valueFrom: postgres_schema
+  - name: LAKEBASE_ENDPOINT_NAME
+    valueFrom: lakebase_endpoint_name
+  - name: APP_NAME
+    valueFrom: app_name
+  - name: CATALOG_NAME
+    valueFrom: catalog_name
+  - name: DATABRICKS_CATALOG
+    valueFrom: databricks_catalog
+  - name: DATABRICKS_SCHEMA
+    valueFrom: databricks_schema
+  - name: VOLUME_CATALOG
+    valueFrom: volume_catalog
+  - name: VOLUME_SCHEMA
+    valueFrom: volume_schema
+  - name: VOLUME_NAME
+    valueFrom: volume_name
+  - name: MLFLOW_ENABLE_DB_SDK
     value: "true"
-
-  # ─── Frontend Build (Databricks Job) ───────────────────────────
-  - name: "FRONTEND_BUILD_USE_SERVERLESS"
+  - name: FRONTEND_BUILD_USE_SERVERLESS
     value: "true"
-  - name: "FRONTEND_BUILD_NODE_TYPE"
+  - name: FRONTEND_BUILD_NODE_TYPE
     value: "i3.xlarge"
-  - name: "FRONTEND_BUILD_SPARK_VERSION"
+  - name: FRONTEND_BUILD_SPARK_VERSION
     value: "14.3.x-scala2.12"
-  - name: "FRONTEND_BUILD_TIMEOUT_SECONDS"
+  - name: FRONTEND_BUILD_TIMEOUT_SECONDS
     value: "300"

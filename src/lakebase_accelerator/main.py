@@ -177,15 +177,44 @@ async def global_exception_handler(request: Request, exc: Exception) -> JSONResp
     )
 
 
-# Serve test HTML page at root (for local development testing only)
+# Serve frontend static files
 if STATIC_DIR.exists():
-    app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+    # Mount assets directory for JS/CSS bundles
+    assets_dir = STATIC_DIR / "assets"
+    if assets_dir.exists():
+        app.mount("/assets", StaticFiles(directory=str(assets_dir)), name="assets")
+
+
+@app.get("/favicon.svg")
+async def serve_favicon():
+    """Serve favicon."""
+    favicon_path = STATIC_DIR / "favicon.svg"
+    if favicon_path.exists():
+        return FileResponse(str(favicon_path), media_type="image/svg+xml")
+    return JSONResponse(status_code=404, content={"detail": "Not found"})
 
 
 @app.get("/")
-async def serve_test_page():
-    """Serve the test HTML page for local development."""
+async def serve_index():
+    """Serve the frontend index.html."""
     index_path = STATIC_DIR / "index.html"
     if index_path.exists():
         return FileResponse(str(index_path))
     return {"message": "Lakebase Accelerator API", "docs": "/docs"}
+
+
+@app.get("/{path:path}")
+async def serve_spa(path: str):
+    """Catch-all for SPA routing — serve index.html for non-API/non-asset paths."""
+    # Don't catch API routes or asset files
+    if path.startswith("api/") or path.startswith("docs") or path.startswith("openapi"):
+        return JSONResponse(status_code=404, content={"detail": "Not found"})
+    # Try to serve the file directly from static
+    file_path = STATIC_DIR / path
+    if file_path.exists() and file_path.is_file():
+        return FileResponse(str(file_path))
+    # Fall back to index.html for SPA routing
+    index_path = STATIC_DIR / "index.html"
+    if index_path.exists():
+        return FileResponse(str(index_path))
+    return JSONResponse(status_code=404, content={"detail": "Not found"})

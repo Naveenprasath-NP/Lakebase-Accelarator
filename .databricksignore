@@ -1,0 +1,12 @@
+# Exclude non-deployment files
+.git/
+.databricks/
+tests/
+design/
+Define/
+scripts/
+.env.sample
+.gitignore
+Makefile
+*.xlsx
+*.vsdx
