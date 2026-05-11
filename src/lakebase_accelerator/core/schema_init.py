@@ -114,6 +114,21 @@ DDL_STATEMENTS = [
         modified_by         VARCHAR(255) NOT NULL DEFAULT 'sp_accelerator'
     )
     """,
+    f"""
+    CREATE TABLE IF NOT EXISTS {ACCELERATOR_META_SCHEMA}.system_prompts (
+        id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        prompt_name     VARCHAR(100) NOT NULL,
+        prompt_type     VARCHAR(50) NOT NULL DEFAULT 'system',
+        prompt_version  VARCHAR(10) NOT NULL DEFAULT 'v1',
+        prompt_text     TEXT NOT NULL,
+        description     TEXT,
+        is_active       BOOLEAN NOT NULL DEFAULT true,
+        created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        created_by      VARCHAR(255) NOT NULL DEFAULT 'sp_accelerator',
+        modified_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        modified_by     VARCHAR(255) NOT NULL DEFAULT 'sp_accelerator'
+    )
+    """,
     # Indexes
     f"CREATE INDEX IF NOT EXISTS idx_projects_status ON {ACCELERATOR_META_SCHEMA}.projects(status)",
     f"CREATE INDEX IF NOT EXISTS idx_projects_mode ON {ACCELERATOR_META_SCHEMA}.projects(mode)",
@@ -121,6 +136,8 @@ DDL_STATEMENTS = [
     f"CREATE INDEX IF NOT EXISTS idx_prompts_project ON {ACCELERATOR_META_SCHEMA}.prompts(project_id)",
     f"CREATE INDEX IF NOT EXISTS idx_model_consumption_project ON {ACCELERATOR_META_SCHEMA}.model_consumption(project_id)",
     f"CREATE INDEX IF NOT EXISTS idx_error_logs_project ON {ACCELERATOR_META_SCHEMA}.error_logs(project_id)",
+    f"CREATE INDEX IF NOT EXISTS idx_system_prompts_name ON {ACCELERATOR_META_SCHEMA}.system_prompts(prompt_name)",
+    f"CREATE UNIQUE INDEX IF NOT EXISTS idx_system_prompts_name_version ON {ACCELERATOR_META_SCHEMA}.system_prompts(prompt_name, prompt_version) WHERE is_active = true",
 ]
 
 

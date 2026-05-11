@@ -55,9 +55,12 @@ class ModelConsumptionService:
                 INSERT INTO accelerator_meta.model_consumption
                     (project_id, model_endpoint, model_name, call_type,
                      input_tokens, output_tokens, total_tokens, latency_ms, status)
-                VALUES (%s::uuid, %s, %s, %s, %s, %s, %s, %s, %s)
+                VALUES (
+                    CASE WHEN %s = '' THEN NULL ELSE %s::uuid END,
+                    %s, %s, %s, %s, %s, %s, %s, %s)
                 """,
                 (
+                    project_id,
                     project_id,
                     model_endpoint,
                     model_name,

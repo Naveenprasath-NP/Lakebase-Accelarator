@@ -7,6 +7,7 @@ The WorkspaceClient and connection pool are initialized at app startup (lifespan
 from lakebase_accelerator.client.llm_client import LLMClient
 from lakebase_accelerator.repositories.databricks_apps_repository import DatabricksAppsRepository
 from lakebase_accelerator.repositories.lakebase_repository import LakebaseRepository
+from lakebase_accelerator.repositories.prompt_repository import PromptRepository
 from lakebase_accelerator.repositories.volume_repository import VolumeRepository
 from lakebase_accelerator.repositories.workspace_files_repository import WorkspaceFilesRepository
 from lakebase_accelerator.services.app_deployment_service import AppDeploymentService
@@ -19,6 +20,7 @@ from lakebase_accelerator.services.frontend_generation_service import FrontendGe
 from lakebase_accelerator.services.greenfield_pipeline_service import GreenFieldPipelineService
 from lakebase_accelerator.services.model_consumption_service import ModelConsumptionService
 from lakebase_accelerator.services.permission_service import PermissionService
+from lakebase_accelerator.services.prompt_service import PromptService
 from lakebase_accelerator.services.prototype_ingestion_service import PrototypeIngestionService
 from lakebase_accelerator.services.requirement_intake_service import RequirementIntakeService
 from lakebase_accelerator.services.schema_provisioning_service import SchemaProvisioningService
@@ -169,6 +171,16 @@ def get_audit_service() -> AuditService:
 def get_model_consumption_service() -> ModelConsumptionService:
     """Create ModelConsumptionService with lakebase repository for DB access."""
     return ModelConsumptionService(lakebase_repo=get_lakebase_repository())
+
+
+def get_prompt_repository() -> PromptRepository:
+    """Create PromptRepository with lakebase repository for DB access."""
+    return PromptRepository(lakebase_repo=get_lakebase_repository())
+
+
+def get_prompt_service() -> PromptService:
+    """Create PromptService with prompt repository."""
+    return PromptService(prompt_repo=get_prompt_repository())
 
 
 def get_error_logging_service() -> ErrorLoggingService:

@@ -312,3 +312,110 @@ prototype_ingestion:
       ],
       "migration_notes": "string"
     }
+
+frontend_plan:
+  version: v1
+  system: |
+    Plan a minimal React frontend for a CRUD app with DARK THEME. Return ONLY a JSON array of file paths:
+    ["package.json", "vite.config.ts", "tsconfig.json", "tsconfig.node.json", "index.html", "src/main.tsx", "src/App.tsx", "src/api/client.ts", "src/index.css"]
+
+    Keep it minimal — one App.tsx with all CRUD UI inline. No separate page files.
+    IMPORTANT: Always include tsconfig.node.json (required by vite.config.ts).
+
+frontend_file_generation:
+  version: v2
+  system: |
+    Generate COMPLETE content for the requested file.
+
+    DESIGN SYSTEM (MUST follow — DARK THEME):
+    - Background: #0f172a (dark navy)
+    - Surface/cards: #1e293b (slate-800)
+    - Surface hover: #334155 (slate-700)
+    - Primary button: #3b82f6 (blue-500), hover: #2563eb
+    - Danger button: #ef4444, Success: #22c55e
+    - Text primary: #f1f5f9 (slate-100)
+    - Text secondary: #94a3b8 (slate-400)
+    - Text muted: #64748b (slate-500)
+    - Borders: #334155 (slate-700)
+    - Input background: #0f172a with border #334155
+    - Focus ring: box-shadow: 0 0 0 3px rgba(59,130,246,0.15)
+    - Layout: sidebar navigation (240px, bg #1e293b) + main content area
+    - Tables: full-width, uppercase headers, hover row highlight with #334155
+    - Buttons: rounded-lg, font-weight 600, hover translateY(-1px) + shadow
+    - Font: system-ui, -apple-system, sans-serif
+
+    Rules:
+    - React 18 + TypeScript + Vite
+    - DO NOT use Tailwind — use plain CSS with CSS custom properties (variables)
+    - src/index.css: define :root with all design tokens above, global styles
+    - App.tsx: sidebar + main content layout, CRUD UI with dark theme
+    - API calls use fetch() to /api/{entity_plural}
+    - Keep it simple — everything in App.tsx for small apps
+    - package.json must include: react, react-dom, typescript, vite, @vitejs/plugin-react
+    - File MUST be complete — no truncation
+    - Return ONLY the code, no markdown
+
+frontend_static_fallback:
+  version: v1
+  system: |
+    Generate a COMPLETE single-page HTML app with inline JavaScript and CSS.
+
+    REQUIREMENTS:
+    - Use a DARK THEME design system with these colors:
+      - Background: #0f172a (dark navy)
+      - Surface/cards: #1e293b (slate-800)
+      - Surface hover: #334155 (slate-700)
+      - Primary button: #3b82f6 (blue-500), hover: #2563eb
+      - Danger button: #ef4444
+      - Success: #22c55e
+      - Text primary: #f1f5f9 (slate-100)
+      - Text secondary: #94a3b8 (slate-400)
+      - Text muted: #64748b (slate-500)
+      - Borders: #334155 (slate-700)
+      - Input background: #0f172a with border #334155
+      - Focus ring: box-shadow: 0 0 0 3px rgba(59,130,246,0.15)
+    - Layout: sidebar navigation (260px, bg #1e293b) + main content area (padding 32px)
+    - Sidebar: app name at top, nav links for each entity (active = blue tint background)
+    - Tables: full-width inside cards, uppercase header labels (text-xs, letter-spacing), hover row highlight
+    - Buttons: rounded-lg (8px), font-weight 600, hover lifts with shadow
+    - Cards: bg #1e293b, border #334155, rounded-xl (12px), shadow
+    - Forms: dark inputs (bg #0f172a, border #334155), blue focus ring, labels above
+    - Font: Inter (system-ui fallback), 14px body, 24px page titles
+    - All transitions: 150ms ease
+    - Use CSS custom properties for theming (define :root variables)
+    - Create a sidebar interface with one section per entity
+    - Each section has: a create form, and a data table showing all records with edit/delete buttons
+    - Use fetch() for ALL API calls (GET, POST, PUT, DELETE)
+    - API calls must use the EXACT paths provided (do not guess or change them)
+    - Load data for the active section on nav click AND on page load for the first entity
+    - Show loading states and error messages
+    - All CRUD operations must work: Create, Read (list + detail), Update, Delete
+    - Forms must submit JSON with Content-Type: application/json
+    - After create/update/delete, refresh the list
+    - Return ONLY the complete HTML file, no markdown fences
+
+frontend_brownfield:
+  version: v1
+  system: |
+    You are a senior frontend developer. Generate a COMPLETE single-page HTML application that REPLICATES the prototype described below.
+
+    This is a BROWNFIELD migration — the goal is to recreate the prototype's UI and functionality at production quality.
+
+    CRITICAL REQUIREMENTS:
+    - Use a DARK THEME design system:
+      - Background: #0f172a, Surface: #1e293b, Borders: #334155
+      - Primary: #3b82f6, Danger: #ef4444, Success: #22c55e
+      - Text: #f1f5f9 (primary), #94a3b8 (secondary), #64748b (muted)
+      - Inputs: bg #0f172a, border #334155, focus ring blue
+      - Buttons: rounded-lg, font-weight 600, hover shadow
+      - Cards: bg #1e293b, border #334155, rounded-xl
+    - Layout: sidebar (260px) + main content (padding 32px)
+    - Replicate the prototype's ACTUAL UI layout, pages, navigation, and interactions
+    - Use CSS custom properties for theming
+    - Use vanilla JavaScript (no framework needed for static HTML)
+    - Use fetch() for ALL API calls to the backend
+    - API calls must use the EXACT paths provided
+    - Include ALL features described in the prototype
+    - Make it responsive and production-quality
+    - Include proper loading states, error handling, and empty states
+    - Return ONLY the complete HTML file, no markdown fences

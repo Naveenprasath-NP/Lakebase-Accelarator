@@ -10,47 +10,47 @@ env:
 
   # ─── Databricks Workspace ────────────────────────────────────────
   - name: "DATABRICKS_HOST"
-    value: "https://dbc-c73ed9f3-a15d.cloud.databricks.com"
+    value-from: "lakebase-accelerator.databricks-host"
   - name: "DATABRICKS_CLIENT_ID"
-    value: "b92071dc-4a32-4d54-bfb8-98c387acce0f"
+    value-from: "lakebase-accelerator.databricks-client-id"
   - name: "DATABRICKS_CLIENT_SECRET"
-    value: "dose21d98fe2a5cc71c92d078865897d19c4"
+    value-from: "lakebase-accelerator.databricks-client-secret"
 
   # ─── Model Serving ──────────────────────────────────────────────
   - name: "MODEL_SERVING_ENDPOINT"
-    value: "databricks-claude-sonnet-4-5"
+    value-from: "lakebase-accelerator.model-serving-endpoint"
 
   # ─── Lakebase / Postgres ────────────────────────────────────────
   - name: "POSTGRES_HOST"
-    value: "ep-old-paper-d2xjx2mt.database.us-east-1.cloud.databricks.com"
+    value-from: "lakebase-accelerator.postgres-host"
   - name: "POSTGRES_PORT"
-    value: "5432"
+    value-from: "lakebase-accelerator.postgres-port"
   - name: "POSTGRES_USER"
-    value: "b92071dc-4a32-4d54-bfb8-98c387acce0f"
+    value-from: "lakebase-accelerator.postgres-user"
   - name: "POSTGRES_DB"
-    value: "databricks_postgres"
+    value-from: "lakebase-accelerator.postgres-db"
   - name: "POSTGRES_SCHEMA"
-    value: "public"
+    value-from: "lakebase-accelerator.postgres-schema"
   - name: "LAKEBASE_ENDPOINT_NAME"
-    value: "projects/lakebase-accelerator-poc/branches/production/endpoints/primary"
+    value-from: "lakebase-accelerator.lakebase-endpoint-name"
 
   # ─── Application ────────────────────────────────────────────────
   - name: "APP_NAME"
-    value: "lakebase-accelerator"
+    value-from: "lakebase-accelerator.app-name"
   - name: "CATALOG_NAME"
-    value: "lakebase_accelerator_poc"
+    value-from: "lakebase-accelerator.catalog-name"
   - name: "DATABRICKS_CATALOG"
-    value: "lakebase_accelerator_poc"
+    value-from: "lakebase-accelerator.databricks-catalog"
   - name: "DATABRICKS_SCHEMA"
-    value: "public"
+    value-from: "lakebase-accelerator.databricks-schema"
 
   # ─── Volume Storage (Brownfield) ────────────────────────────────
   - name: "VOLUME_CATALOG"
-    value: "lakebase_poc_catalog_assets"
+    value-from: "lakebase-accelerator.volume-catalog"
   - name: "VOLUME_SCHEMA"
-    value: "asset_bundles"
+    value-from: "lakebase-accelerator.volume-schema"
   - name: "VOLUME_NAME"
-    value: "input_files"
+    value-from: "lakebase-accelerator.volume-name"
 
   # ─── MLflow ─────────────────────────────────────────────────────
   - name: "MLFLOW_ENABLE_DB_SDK"

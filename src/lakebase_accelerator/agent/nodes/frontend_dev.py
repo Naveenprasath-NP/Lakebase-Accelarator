@@ -18,23 +18,75 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from lakebase_accelerator.agent.llm import get_llm
 from lakebase_accelerator.agent.state import PipelineState
 from lakebase_accelerator.utils.logger import logger
+from lakebase_accelerator.utils.prompt_loader import get_system_prompt
 
-FRONTEND_PLAN_PROMPT = """Plan a minimal React frontend for a CRUD app. Return ONLY a JSON array of file paths:
+
+def _get_frontend_plan_prompt() -> str:
+    """Load the frontend plan prompt from DB/YAML."""
+    try:
+        return get_system_prompt("frontend_plan")
+    except KeyError:
+        return FRONTEND_PLAN_PROMPT_FALLBACK
+
+
+def _get_frontend_file_prompt() -> str:
+    """Load the frontend file generation prompt from DB/YAML."""
+    try:
+        return get_system_prompt("frontend_file_generation")
+    except KeyError:
+        return FRONTEND_FILE_PROMPT_FALLBACK
+
+
+def _get_frontend_static_prompt() -> str:
+    """Load the frontend static fallback prompt from DB/YAML."""
+    try:
+        return get_system_prompt("frontend_static_fallback")
+    except KeyError:
+        return FRONTEND_STATIC_FALLBACK_PROMPT
+
+
+def _get_frontend_brownfield_prompt() -> str:
+    """Load the brownfield frontend prompt from DB/YAML."""
+    try:
+        return get_system_prompt("frontend_brownfield")
+    except KeyError:
+        return FRONTEND_BROWNFIELD_PROMPT_FALLBACK
+
+FRONTEND_PLAN_PROMPT_FALLBACK = """Plan a minimal React frontend for a CRUD app with DARK THEME. Return ONLY a JSON array of file paths:
 ["package.json", "vite.config.ts", "tsconfig.json", "tsconfig.node.json", "index.html", "src/main.tsx", "src/App.tsx", "src/api/client.ts", "src/index.css"]
 
 Keep it minimal — one App.tsx with all CRUD UI inline. No separate page files.
 IMPORTANT: Always include tsconfig.node.json (required by vite.config.ts).
 """
 
-FRONTEND_FILE_PROMPT = """Generate COMPLETE content for: {file_path}
+FRONTEND_FILE_PROMPT_FALLBACK = """Generate COMPLETE content for: {file_path}
 
 Entities: {entities_summary}
 API base: /api (same origin, relative)
 
+DESIGN SYSTEM (MUST follow — DARK THEME):
+- Background: #0f172a (dark navy)
+- Surface/cards: #1e293b (slate-800)
+- Surface hover: #334155 (slate-700)
+- Primary button: #3b82f6 (blue-500), hover: #2563eb
+- Danger button: #ef4444, Success: #22c55e
+- Text primary: #f1f5f9 (slate-100)
+- Text secondary: #94a3b8 (slate-400)
+- Text muted: #64748b (slate-500)
+- Borders: #334155 (slate-700)
+- Input background: #0f172a with border #334155
+- Focus ring: box-shadow: 0 0 0 3px rgba(59,130,246,0.15)
+- Layout: sidebar navigation (240px, bg #1e293b) + main content area
+- Tables: full-width, uppercase headers, hover row highlight with #334155
+- Buttons: rounded-lg, font-weight 600, hover translateY(-1px) + shadow
+- Font: system-ui, -apple-system, sans-serif
+
 Rules:
-- React 18 + TypeScript + Vite + Tailwind CSS (via CDN in index.html OR via PostCSS)
-- App.tsx: single-page CRUD UI with list, create form, edit, delete
-- API calls use fetch() to /api/{{entity_plural}}
+- React 18 + TypeScript + Vite
+- DO NOT use Tailwind — use plain CSS with CSS custom properties (variables)
+- src/index.css: define :root with all design tokens above, global styles
+- App.tsx: sidebar + main content layout, CRUD UI with dark theme
+- API calls use fetch() to /api/{entity_plural}
 - Keep it simple — everything in App.tsx for small apps
 - package.json must include: react, react-dom, typescript, vite, @vitejs/plugin-react
 - vite.config.ts: use default build output (dist/), no custom outDir
@@ -77,15 +129,73 @@ def frontend_dev_node(state: PipelineState) -> dict:
     pipeline_type = state.get("pipeline_type", "greenfield")
     prototype_context = state.get("prototype_context", "")
 
-    # Step 1: Generate React source files via LLM
-    logger.info("Generating React source files via LLM...", extra={"step": "frontend_dev"})
-    try:
-        source_files = _generate_frontend_files(entities_summary, data_model, backend_files)
-    except Exception as e:
-        logger.warning(f"Frontend file generation failed: {e}", extra={"step": "frontend_dev"})
-        source_files = None
+    # ─── Template-based React generation ──────────────────────────────
+    # 1. Render fixed template files (package.json, vite.config, tsconfig, etc.)
+    # 2. Single LLM call to generate ONLY App.tsx (with full context)
+    # 3. Submit to Databricks Job for build
+    # 4. Fallback to static HTML if build fails
+    logger.info("Generating React frontend (template + LLM for App.tsx)...", extra={"step": "frontend_dev"})
 
-    if not source_files:
+    project_name = state.get("project_name", "generated-app")
+    project_title = project_name.replace("-", " ").title()
+    api_contract = _extract_api_contract(backend_files, data_model)
+
+    # Step 1: Render template files
+    source_files = _render_frontend_templates(project_name, project_title)
+
+    # Step 2: Generate App.tsx via LLM (single call with full context)
+    try:
+        app_tsx = _generate_app_tsx(entities_summary, api_contract, data_model, pipeline_type, prototype_context)
+        source_files["src/App.tsx"] = app_tsx
+    except Exception as e:
+        logger.warning(f"App.tsx generation failed: {e}, using static fallback", extra={"step": "frontend_dev"})
+        frontend_files = _generate_static_fallback(entities_summary, data_model, api_contract)
+        return {
+            "frontend_files": frontend_files,
+            "current_step": "frontend_dev",
+            "completed_steps": state.get("completed_steps", []) + ["frontend_dev"],
+        }
+
+    # Step 3: Build via Databricks Job
+    logger.info(f"Building React frontend ({len(source_files)} files)...", extra={"step": "frontend_dev"})
+
+    try:
+        from lakebase_accelerator.agent.tools import _get_workspace_client
+        from lakebase_accelerator.services.frontend_build_service import FrontendBuildService
+        import asyncio
+        import concurrent.futures
+
+        workspace_client = _get_workspace_client()
+        build_service = FrontendBuildService(workspace_client)
+
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+
+        if loop and loop.is_running():
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                future = pool.submit(asyncio.run, build_service.build_frontend(app_name, source_files))
+                static_files = future.result(timeout=360)
+        else:
+            static_files = asyncio.run(build_service.build_frontend(app_name, source_files))
+
+        logger.info(f"React build complete: {len(static_files)} static files", extra={"step": "frontend_dev"})
+
+        return {
+            "frontend_files": static_files,
+            "current_step": "frontend_dev",
+            "completed_steps": state.get("completed_steps", []) + ["frontend_dev"],
+        }
+
+    except Exception as e:
+        logger.warning(f"React build failed ({e}), falling back to static HTML", extra={"step": "frontend_dev"})
+        frontend_files = _generate_static_fallback(entities_summary, data_model, api_contract)
+        return {
+            "frontend_files": frontend_files,
+            "current_step": "frontend_dev",
+            "completed_steps": state.get("completed_steps", []) + ["frontend_dev"],
+        }
         logger.warning("LLM failed to generate frontend files, using static fallback")
         api_contract = _extract_api_contract(backend_files, data_model)
         if pipeline_type == "brownfield" and prototype_context:
@@ -161,6 +271,109 @@ def frontend_dev_node(state: PipelineState) -> dict:
         }
 
 
+def _render_frontend_templates(project_name: str, project_title: str) -> dict[str, str]:
+    """Render fixed frontend template files using Jinja2.
+
+    These files never change — they're the scaffolding that App.tsx plugs into.
+    """
+    from pathlib import Path
+    from jinja2 import Environment, FileSystemLoader
+
+    template_dir = Path(__file__).parent.parent.parent / "resources" / "templates" / "frontend"
+    env = Environment(loader=FileSystemLoader(str(template_dir)))
+
+    context = {"project_name": project_name, "project_title": project_title}
+
+    files: dict[str, str] = {}
+    template_map = {
+        "package.json": "package.json.j2",
+        "vite.config.ts": "vite.config.ts.j2",
+        "tsconfig.json": "tsconfig.json.j2",
+        "tsconfig.node.json": "tsconfig.node.json.j2",
+        "index.html": "index.html.j2",
+        "src/main.tsx": "main.tsx.j2",
+        "src/index.css": "index.css.j2",
+    }
+
+    for output_path, template_name in template_map.items():
+        template = env.get_template(template_name)
+        files[output_path] = template.render(**context)
+
+    return files
+
+
+def _generate_app_tsx(
+    entities_summary: str,
+    api_contract: str,
+    data_model: dict,
+    pipeline_type: str,
+    prototype_context: str,
+) -> str:
+    """Generate App.tsx via a single LLM call with full context.
+
+    The LLM only generates the React component code — all config files
+    and CSS are handled by templates.
+    """
+    llm = get_llm(max_tokens=16384)
+
+    # Build entity details for the prompt
+    tables = data_model.get("tables", [])
+    entity_details = []
+    for table in tables:
+        cols = [c for c in table.get("columns", []) if c["name"] not in ("id", "created_at", "updated_at")]
+        entity_details.append({
+            "name": table["name"],
+            "plural": table["name"] if table["name"].endswith("s") else f"{table['name']}s",
+            "columns": [{"name": c["name"], "type": c["data_type"], "nullable": c.get("nullable", True)} for c in cols],
+        })
+
+    prompt = f"""Generate a COMPLETE React App.tsx component for a CRUD application.
+
+## Entities
+{json.dumps(entity_details, indent=2)}
+
+## API Contract
+{api_contract}
+
+## Requirements
+- Export a default App component
+- Use a sidebar layout: left sidebar with nav links for each entity, main content area on the right
+- Implement full CRUD for each entity: List (table), Create (form), Edit (form), Delete (button)
+- Use fetch() for API calls to /api/{{entity_plural}} (same origin, relative paths)
+- Use React useState and useEffect hooks for state management
+- Show the active entity's data in the main content area
+- Tables should show all columns (except id, created_at, updated_at)
+- Forms should have inputs for all editable columns
+- Include loading states (show "Loading..." while fetching)
+- Include error handling (show error message if API fails)
+- After create/update/delete, refresh the list
+- Use className references to the CSS classes defined in index.css:
+  - Layout: "app-layout", "sidebar", "sidebar-title", "nav-item", "nav-item active", "main-content"
+  - Page: "page-header", "page-title"
+  - Buttons: "btn btn-primary", "btn btn-danger", "btn btn-secondary", "btn-sm"
+  - Cards: "card", "card-body"
+  - Tables: "data-table", "actions"
+  - Forms: "form-group", "form-label", "form-input", "form-select", "form-textarea"
+  - States: "spinner", "empty-state"
+  - Modal: "modal-overlay", "modal", "modal-title", "modal-actions"
+- Do NOT import any CSS file (index.css is already imported in main.tsx)
+- Do NOT use Tailwind classes
+- Return ONLY the TypeScript/React code, no markdown fences
+- The file MUST be complete and syntactically valid — no truncation"""
+
+    if pipeline_type == "brownfield" and prototype_context:
+        prompt += f"\n\n## Prototype Context (replicate this UI)\n{prototype_context[:3000]}"
+
+    response = llm.invoke(
+        [
+            SystemMessage(content="Generate a complete, valid React TypeScript component. Return ONLY code, no markdown. The component must compile without errors."),
+            HumanMessage(content=prompt),
+        ]
+    )
+
+    return _strip_markdown(response.content)
+
+
 def _generate_frontend_files(entities_summary: str, data_model: dict, backend_files: dict) -> dict[str, str] | None:
     """Generate React source files using LLM.
 
@@ -171,7 +384,7 @@ def _generate_frontend_files(entities_summary: str, data_model: dict, backend_fi
     # Plan
     response = llm.invoke(
         [
-            SystemMessage(content=FRONTEND_PLAN_PROMPT),
+            SystemMessage(content=_get_frontend_plan_prompt()),
             HumanMessage(content=f"Plan for:\n{entities_summary}"),
         ]
     )
@@ -203,12 +416,18 @@ def _generate_frontend_files(entities_summary: str, data_model: dict, backend_fi
         if file_path == "package.json":
             prompt = _build_package_json_prompt(entities_summary)
         else:
-            prompt = FRONTEND_FILE_PROMPT.format(file_path=file_path, entities_summary=entities_summary)
+            template = _get_frontend_file_prompt()
+            # Safe replacement — only replace known placeholders, leave others intact
+            prompt = template.replace("{file_path}", file_path).replace("{entities_summary}", entities_summary)
             prompt += f"\n\nAPI Contract (use these exact paths):\n{api_contract}"
 
         response = llm_gen.invoke(
             [
-                SystemMessage(content="Generate complete file content. No markdown. No truncation."),
+                SystemMessage(content=f"Generate ONLY the content for the file '{file_path}'. "
+                              f"This is a {file_path.split('.')[-1]} file. "
+                              f"Do NOT include React components in config files. "
+                              f"Do NOT include JSON in .ts/.tsx files. "
+                              f"Return ONLY valid content for this specific file type. No markdown."),
                 HumanMessage(content=prompt),
             ]
         )

@@ -59,6 +59,13 @@ async def lifespan(app: FastAPI):
         set_connection_pool(lakebase_pool)
         # Initialize accelerator_meta schema (creates tables if not exist)
         initialize_accelerator_schema(lakebase_pool)
+        # Seed system prompts from YAML to DB (only inserts missing ones)
+        try:
+            from lakebase_accelerator.services.dependencies import get_prompt_service
+            prompt_service = get_prompt_service()
+            prompt_service.seed_prompts_from_yaml()
+        except Exception as e:
+            logger.warning(f"Failed to seed prompts to DB (non-fatal): {e}")
         # Set tool dependencies for LangGraph agent
         set_tool_dependencies(lakebase_pool, settings)
     else:

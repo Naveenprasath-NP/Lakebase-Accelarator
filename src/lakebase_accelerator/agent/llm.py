@@ -9,6 +9,7 @@ import time
 from typing import Any
 
 import httpx
+from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.messages import BaseMessage
 from langchain_openai import ChatOpenAI
 
@@ -19,20 +20,25 @@ from lakebase_accelerator.utils.logger import logger
 _cached_token: str | None = None
 
 
-def get_llm(max_tokens: int = 4096) -> ChatOpenAI:
+def get_llm(max_tokens: int = 4096, project_id: str = "", call_type: str = "pipeline") -> ChatOpenAI:
     """Create a ChatOpenAI instance pointed at Databricks Model Serving.
+
+    Includes a callback that automatically logs token consumption for every
+    invoke() call, so individual nodes don't need to use invoke_with_logging().
 
     Args:
         max_tokens: Max tokens for the response.
+        project_id: Project ID for consumption logging (optional).
+        call_type: Type of call for logging (optional).
 
     Returns:
-        ChatOpenAI configured for Databricks.
+        ChatOpenAI configured for Databricks with auto-logging callback.
     """
     settings = get_settings()
     token = _get_workspace_token(settings)
     base_url = f"{settings.databricks_host}/serving-endpoints"
 
-    return ChatOpenAI(
+    llm = ChatOpenAI(
         model=settings.model_serving_endpoint,
         base_url=base_url,
         api_key=token,
@@ -41,7 +47,9 @@ def get_llm(max_tokens: int = 4096) -> ChatOpenAI:
         streaming=False,
         stream_usage=False,
         disable_streaming=True,
+        callbacks=[_ConsumptionLoggingCallback(project_id, call_type, settings.model_serving_endpoint)],
     )
+    return llm
 
 
 def _get_workspace_token(settings) -> str:
@@ -139,3 +147,79 @@ def invoke_with_logging(
         )
 
     return response
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# CALLBACK HANDLER — Auto-logs token consumption for every LLM call
+# ═══════════════════════════════════════════════════════════════════════
+
+
+class _ConsumptionLoggingCallback(BaseCallbackHandler):
+    """LangChain callback that logs token consumption after every LLM call.
+
+    This is attached to every ChatOpenAI instance created by get_llm(),
+    so ALL nodes automatically get consumption logging without needing
+    to use invoke_with_logging() explicitly.
+    """
+
+    def __init__(self, project_id: str, call_type: str, model_endpoint: str) -> None:
+        self._project_id = project_id
+        self._call_type = call_type
+        self._model_endpoint = model_endpoint
+        self._start_time: float = 0
+
+    def on_llm_start(self, *args, **kwargs) -> None:
+        """Record start time when LLM call begins."""
+        self._start_time = time.time()
+
+    def on_llm_end(self, response, **kwargs) -> None:
+        """Log token consumption when LLM call completes."""
+        latency_ms = (time.time() - self._start_time) * 1000 if self._start_time else 0
+
+        # Extract token usage from LLM result
+        input_tokens = 0
+        output_tokens = 0
+        total_tokens = 0
+
+        if hasattr(response, "llm_output") and response.llm_output:
+            token_usage = response.llm_output.get("token_usage", {})
+            input_tokens = token_usage.get("prompt_tokens", 0)
+            output_tokens = token_usage.get("completion_tokens", 0)
+            total_tokens = token_usage.get("total_tokens", 0)
+
+        # Fire-and-forget logging
+        try:
+            service = get_model_consumption_service()
+            service.log_consumption(
+                project_id=self._project_id if self._project_id else None,
+                model_endpoint=self._model_endpoint,
+                model_name=self._model_endpoint,
+                call_type=self._call_type,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                total_tokens=total_tokens,
+                latency_ms=latency_ms,
+                status="success",
+            )
+        except Exception as e:
+            logger.debug(f"Consumption callback logging failed (non-fatal): {e}")
+
+    def on_llm_error(self, error, **kwargs) -> None:
+        """Log failed LLM calls."""
+        latency_ms = (time.time() - self._start_time) * 1000 if self._start_time else 0
+
+        try:
+            service = get_model_consumption_service()
+            service.log_consumption(
+                project_id=self._project_id or "00000000-0000-0000-0000-000000000000",
+                model_endpoint=self._model_endpoint,
+                model_name=self._model_endpoint,
+                call_type=self._call_type,
+                input_tokens=0,
+                output_tokens=0,
+                total_tokens=0,
+                latency_ms=latency_ms,
+                status="error",
+            )
+        except Exception:
+            pass
