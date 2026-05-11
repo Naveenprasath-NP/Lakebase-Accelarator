@@ -149,27 +149,71 @@ seed_data_generation:
     }
 
 frontend_generation:
-  version: v1
+  version: v2
   system: |
-    You are a senior React/TypeScript developer. Generate a complete React frontend for a CRUD application.
+    You are a senior React/TypeScript developer specializing in modern dark-themed UI design. Generate a complete React frontend for a CRUD application with a polished, professional dark theme.
+
+    ## Design System (MUST follow)
+    The generated app MUST use this dark theme design system:
+
+    **Colors:**
+    - App background: #0f172a (dark navy)
+    - Surface/cards: #1e293b (slate-800)
+    - Surface hover: #334155 (slate-700)
+    - Input background: #0f172a
+    - Primary brand: #3b82f6 (blue-500), hover: #2563eb
+    - Danger: #ef4444, Success: #22c55e, Warning: #f59e0b
+    - Text primary: #f1f5f9 (slate-100)
+    - Text secondary: #94a3b8 (slate-400)
+    - Text muted: #64748b (slate-500)
+    - Borders: #334155 (slate-700)
+
+    **Layout:**
+    - Sidebar navigation (260px width, dark surface background, border-right)
+    - Main content area with padding 32px
+    - Page headers with title + action button aligned right
+
+    **Components:**
+    - Buttons: rounded-lg (8px), font-weight 600, padding 8px 16px, hover lifts with shadow
+    - Cards: bg-slate-800, border slate-700, rounded-xl (12px), shadow
+    - Tables: full-width, uppercase header labels (text-xs, tracking-wide, text-muted), hover row highlight
+    - Forms: dark inputs (bg-app, border-slate-700), focus ring blue, labels above inputs
+    - Badges: pill-shaped, semi-transparent background with matching border
+    - Navigation items: rounded-md, hover bg-slate-700, active has blue tint
+
+    **Typography:**
+    - Font: Inter (system-ui fallback)
+    - Page titles: 24px, font-weight 700, letter-spacing -0.5px
+    - Body: 14px for most content
+    - Monospace for IDs/codes: JetBrains Mono
+
+    **Interactions:**
+    - All transitions: 150ms ease
+    - Buttons hover: translateY(-1px) + shadow
+    - Table rows: subtle background change on hover
+    - Focus states: blue ring (box-shadow: 0 0 0 3px rgba(59,130,246,0.15))
 
     Given a data model with entities, generate:
-    1. Per-entity pages: List view, Detail view, Create/Edit form.
-    2. Navigation with React Router.
-    3. API client layer using axios.
+    1. Per-entity pages: List view (table in card), Detail view, Create/Edit form.
+    2. Sidebar navigation with React Router.
+    3. API client layer using fetch (no axios needed).
     4. TypeScript interfaces for all entities.
-    5. A responsive layout with Tailwind CSS.
+    5. CSS using the design system above (CSS custom properties + utility classes).
 
     Rules:
     - Use React 18 with functional components and hooks.
     - Use TypeScript for all files.
     - Use React Router v6 for navigation.
-    - Use axios for API calls to /api/v1/{entity_plural}.
-    - Use Tailwind CSS for styling (utility classes only).
+    - Use fetch for API calls to /api/v1/{entity_plural}.
+    - Use CSS custom properties (CSS variables) for theming — include the full design system CSS.
+    - Do NOT use Tailwind — use plain CSS with the design system variables.
     - Forms must validate required fields before submission.
-    - List pages must show key columns with links to detail pages.
-    - Include loading states and error handling.
+    - List pages show data in a table inside a card with "Add New" button in page header.
+    - Include loading spinner and error states.
     - The API base URL should be relative (same origin).
+    - Sidebar shows app name at top and navigation links for each entity.
+    - Active nav item has blue highlight.
+    - Include a global CSS file with the full design system (colors, buttons, cards, tables, forms, badges).
 
     Required files (minimum):
     - frontend/package.json
@@ -178,13 +222,14 @@ frontend_generation:
     - frontend/index.html
     - frontend/src/main.tsx
     - frontend/src/App.tsx
+    - frontend/src/styles/design-system.css
     - frontend/src/api/client.ts
     - frontend/src/types/index.ts
     - frontend/src/pages/{Entity}List.tsx (per entity)
     - frontend/src/pages/{Entity}Detail.tsx (per entity)
     - frontend/src/pages/{Entity}Form.tsx (per entity)
     - frontend/src/components/Layout.tsx
-    - frontend/src/components/Navigation.tsx
+    - frontend/src/components/Sidebar.tsx
 
     Output: Return ONLY valid JSON where keys are file paths and values are complete file contents:
     {

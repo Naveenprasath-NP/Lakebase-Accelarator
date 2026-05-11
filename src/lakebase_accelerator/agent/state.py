@@ -33,6 +33,14 @@ class PipelineState(TypedDict):
     prototype_context: str  # summarized prototype: UI structure, features, tech stack
     extracted_seed_data: dict  # actual data found in prototype: {table_name: [{col: val}]}
 
+    # ─── Brownfield Exploration Fields ────────────────────────────────
+    project_structure: dict  # discovered project structure tree
+    tech_stack: dict  # identified tech stack details
+    exploration_plan: list[str]  # agent's planned exploration steps
+    tool_call_count: int  # number of tool calls made by exploration agent
+    total_input_tokens: int  # cumulative input tokens across all LLM calls
+    total_output_tokens: int  # cumulative output tokens across all LLM calls
+
     # ─── After Data Model Agent ──────────────────────────────────────
     data_model: dict  # full DDL-ready model (tables, columns, FKs, indexes, creation_order)
 
@@ -63,6 +71,12 @@ class PipelineState(TypedDict):
     deployment_error_logs: str  # error logs from failed deployment
     deployment_retry_count: int  # number of retry attempts (max 2)
     deployment_fix_context: str  # context passed to backend_dev for fixing
+
+    # ─── Checkpoint Fields ────────────────────────────────────────────
+    awaiting_checkpoint: str  # current checkpoint type (empty string when not waiting)
+    checkpoint_data: dict  # data presented to user at checkpoint
+    user_corrections: dict  # corrections received from user
+    dismissed_items: list[str]  # items user dismissed
 
     # ─── Progress ────────────────────────────────────────────────────
     current_step: str

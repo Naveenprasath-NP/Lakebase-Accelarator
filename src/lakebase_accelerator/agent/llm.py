@@ -2,11 +2,17 @@
 
 Uses ChatOpenAI pointed at Databricks Model Serving (OpenAI-compatible).
 Handles OAuth token generation for authentication.
+Provides instrumented invocation with token usage logging.
 """
 
+import time
+from typing import Any
+
 import httpx
+from langchain_core.messages import BaseMessage
 from langchain_openai import ChatOpenAI
 
+from lakebase_accelerator.services.dependencies import get_model_consumption_service
 from lakebase_accelerator.settings import get_settings
 from lakebase_accelerator.utils.logger import logger
 
@@ -64,3 +70,72 @@ def reset_token_cache() -> None:
     """Reset the cached token (call on 401 errors)."""
     global _cached_token
     _cached_token = None
+
+
+def invoke_with_logging(
+    llm: ChatOpenAI,
+    messages: list[BaseMessage],
+    project_id: str,
+    call_type: str,
+) -> Any:
+    """Invoke the LLM and log token consumption metrics.
+
+    Wraps a standard llm.invoke() call with latency measurement and
+    token usage extraction. Logs consumption to the model_consumption
+    table via ModelConsumptionService (fire-and-forget).
+
+    Args:
+        llm: The ChatOpenAI instance to invoke.
+        messages: List of LangChain messages to send.
+        project_id: UUID of the project this call belongs to.
+        call_type: Type of LLM call (e.g., 'intake', 'exploration', 'generation').
+
+    Returns:
+        The LangChain AIMessage response from the LLM.
+    """
+    settings = get_settings()
+
+    start_time = time.time()
+    response = llm.invoke(messages)
+    end_time = time.time()
+
+    latency_ms = (end_time - start_time) * 1000
+
+    # Extract token usage from response metadata
+    input_tokens = 0
+    output_tokens = 0
+    total_tokens = 0
+
+    usage_metadata = getattr(response, "usage_metadata", None)
+    if usage_metadata and isinstance(usage_metadata, dict):
+        input_tokens = usage_metadata.get("input_tokens", 0)
+        output_tokens = usage_metadata.get("output_tokens", 0)
+        total_tokens = usage_metadata.get("total_tokens", 0)
+
+    # Fire-and-forget: log consumption without blocking the response
+    try:
+        consumption_service = get_model_consumption_service()
+        consumption_service.log_consumption(
+            project_id=project_id,
+            model_endpoint=settings.model_serving_endpoint,
+            model_name=settings.model_serving_endpoint,
+            call_type=call_type,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            total_tokens=total_tokens,
+            latency_ms=latency_ms,
+            status="success",
+        )
+    except Exception as e:
+        # Fire-and-forget: never let logging failures affect the LLM response
+        logger.warning(
+            f"Failed to log model consumption: {e}",
+            extra={
+                "project_id": project_id,
+                "call_type": call_type,
+                "latency_ms": latency_ms,
+                "error": str(e),
+            },
+        )
+
+    return response

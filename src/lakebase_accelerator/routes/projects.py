@@ -7,7 +7,15 @@ from fastapi import APIRouter, File, Form, UploadFile
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from lakebase_accelerator.agent.graph import get_pipeline_graph
+from lakebase_accelerator.agent.nodes.checkpoint import (
+    CONFIRMATION_TIMEOUT_SECONDS,
+    HEARTBEAT_INTERVAL_SECONDS,
+    get_pending_checkpoint,
+    is_awaiting_confirmation,
+    submit_confirmation,
+)
 from lakebase_accelerator.models.enums import PipelineStatus, ProjectMode
+from lakebase_accelerator.models.requests import ConfirmationRequest
 from lakebase_accelerator.models.responses import (
     ApiResponse,
     ProjectDetailData,
@@ -159,6 +167,73 @@ async def execute_pipeline(
                     current_step = update.get("current_step", node_name)
                     error = update.get("error", "")
 
+                    # ─── Checkpoint SSE Extensions ────────────────────
+                    # Detect checkpoint timeout (error contains "timed out")
+                    if error and "timed out" in error.lower():
+                        timeout_data = {
+                            "step": current_step,
+                            "status": "timeout",
+                            "message": error,
+                            "data": {
+                                "checkpoint_type": current_step,
+                                "timeout_seconds": CONFIRMATION_TIMEOUT_SECONDS,
+                            },
+                            "timestamp": datetime.now(UTC).isoformat(),
+                        }
+                        yield f"event: confirmation_timeout\ndata: {json.dumps(timeout_data)}\n\n"
+                        continue
+
+                    # Detect awaiting_checkpoint (non-empty) → emit awaiting_confirmation
+                    awaiting = update.get("awaiting_checkpoint", "")
+                    if awaiting:
+                        checkpoint_data = update.get("checkpoint_data", {})
+                        awaiting_data = {
+                            "step": current_step,
+                            "status": "awaiting_confirmation",
+                            "message": f"Awaiting user confirmation at checkpoint: {awaiting}",
+                            "data": {
+                                "checkpoint_type": awaiting,
+                                "checkpoint_data": checkpoint_data,
+                            },
+                            "timestamp": datetime.now(UTC).isoformat(),
+                        }
+                        yield f"event: awaiting_confirmation\ndata: {json.dumps(awaiting_data)}\n\n"
+                        continue
+
+                    # Detect confirmation received: awaiting_checkpoint cleared + user_corrections present
+                    # This happens when a checkpoint node returns after user confirms
+                    if (
+                        "awaiting_checkpoint" in update
+                        and update.get("awaiting_checkpoint") == ""
+                        and update.get("user_corrections") is not None
+                    ):
+                        confirmed_data = {
+                            "step": current_step,
+                            "status": "confirmed",
+                            "message": f"User confirmation received for checkpoint: {current_step}",
+                            "data": {
+                                "checkpoint_type": current_step,
+                                "has_corrections": bool(update.get("user_corrections")),
+                            },
+                            "timestamp": datetime.now(UTC).isoformat(),
+                        }
+                        yield f"event: confirmation_received\ndata: {json.dumps(confirmed_data)}\n\n"
+
+                        resumed_data = {
+                            "step": current_step,
+                            "status": "resumed",
+                            "message": f"Pipeline resumed after checkpoint: {current_step}",
+                            "data": {
+                                "checkpoint_type": current_step,
+                                "next_step": current_step,
+                            },
+                            "timestamp": datetime.now(UTC).isoformat(),
+                        }
+                        yield f"event: step_resumed\ndata: {json.dumps(resumed_data)}\n\n"
+
+                        continue
+
+                    # ─── Existing SSE Events (unchanged format) ───────
                     if error:
                         sse_data = {
                             "step": current_step,
@@ -178,6 +253,38 @@ async def execute_pipeline(
                             "timestamp": datetime.now(UTC).isoformat(),
                         }
                         yield f"event: step_completed\ndata: {json.dumps(sse_data)}\n\n"
+
+                        # ─── Pre-emit awaiting_confirmation for checkpoint nodes ───
+                        # Since checkpoint nodes BLOCK graph.astream (they await asyncio.Event),
+                        # we emit awaiting_confirmation immediately after the preceding step
+                        # completes, using the step's output data as checkpoint_data.
+                        _checkpoint_after = {
+                            "intake": "analysis_review",
+                            "brownfield_exploration": "analysis_review",
+                        }
+                        if node_name in _checkpoint_after:
+                            checkpoint_type = _checkpoint_after[node_name]
+                            # Build checkpoint data from the step's output
+                            cp_data = {
+                                "entities": update.get("entities", []),
+                                "relationships": update.get("relationships", []),
+                                "project_name": update.get("project_name", ""),
+                            }
+                            if node_name == "brownfield_exploration":
+                                cp_data["project_structure"] = update.get("project_structure", {})
+                                cp_data["tech_stack"] = update.get("tech_stack", {})
+
+                            awaiting_data = {
+                                "step": checkpoint_type,
+                                "status": "awaiting_confirmation",
+                                "message": f"Awaiting user confirmation at checkpoint: {checkpoint_type}",
+                                "data": {
+                                    "checkpoint_type": checkpoint_type,
+                                    "checkpoint_data": cp_data,
+                                },
+                                "timestamp": datetime.now(UTC).isoformat(),
+                            }
+                            yield f"event: awaiting_confirmation\ndata: {json.dumps(awaiting_data)}\n\n"
 
             # Pipeline complete — use the last update to determine outcome
             pipeline_duration = _time.time() - pipeline_start
@@ -365,16 +472,103 @@ async def get_project_detail(project_id: str) -> JSONResponse:
         pipeline_duration_seconds=row.get("pipeline_duration_seconds"),
         total_token_usage=row.get("total_token_usage"),
         steps=[],
-        created_at=row["created_at"],
-        updated_at=row.get("modified_at") or row["created_at"],
+        created_at=row["created_at"].isoformat() if hasattr(row["created_at"], "isoformat") else str(row["created_at"]),
+        updated_at=(row.get("modified_at") or row["created_at"]).isoformat() if hasattr((row.get("modified_at") or row["created_at"]), "isoformat") else str(row.get("modified_at") or row["created_at"]),
     )
     resp = success_response(message="Project retrieved successfully", data=data.model_dump(mode='json'))
     return JSONResponse(status_code=200, content=resp.model_dump(mode='json'))
 
 
 # ═══════════════════════════════════════════════════════════════════════
+# CONFIRMATION ENDPOINT
+# ═══════════════════════════════════════════════════════════════════════
+
+
+@router.post("/{project_id}/confirm", response_model=ApiResponse)
+async def confirm_checkpoint(project_id: str, body: ConfirmationRequest) -> JSONResponse:
+    """Submit user confirmation for a pipeline checkpoint.
+
+    Validates that the pipeline is awaiting confirmation and that the
+    checkpoint_type matches the current pending checkpoint. Signals the
+    waiting checkpoint node to resume via asyncio.Event.
+
+    Returns:
+        200: Confirmation submitted successfully.
+        409: Pipeline is not awaiting confirmation or checkpoint_type mismatch.
+
+    Requirements: 2.38, 2.39, 2.40, 2.41
+    """
+    # Check if the project is awaiting confirmation
+    if not is_awaiting_confirmation(project_id):
+        resp = error_response(
+            message=f"Project '{project_id}' is not awaiting confirmation",
+            status_code=409,
+        )
+        return JSONResponse(status_code=409, content=resp.model_dump())
+
+    # Validate checkpoint_type matches the current pending checkpoint
+    pending_type = get_pending_checkpoint(project_id)
+    if pending_type != body.checkpoint_type:
+        resp = error_response(
+            message=(
+                f"Checkpoint type mismatch: expected '{pending_type}', "
+                f"got '{body.checkpoint_type}'"
+            ),
+            status_code=409,
+        )
+        return JSONResponse(status_code=409, content=resp.model_dump())
+
+    # Signal the waiting checkpoint node to resume
+    success = submit_confirmation(
+        project_id=project_id,
+        approved=body.approved,
+        corrections=body.corrections,
+        dismissed_items=body.dismissed_items,
+        additional_context=body.additional_context,
+    )
+
+    if not success:
+        resp = error_response(
+            message=f"Failed to submit confirmation for project '{project_id}'",
+            status_code=409,
+        )
+        return JSONResponse(status_code=409, content=resp.model_dump())
+
+    resp = success_response(
+        message="Confirmation submitted successfully",
+        data={"project_id": project_id, "checkpoint_type": body.checkpoint_type, "approved": body.approved},
+    )
+    return JSONResponse(status_code=200, content=resp.model_dump())
+
+
+# ═══════════════════════════════════════════════════════════════════════
 # HELPERS
 # ═══════════════════════════════════════════════════════════════════════
+
+
+def _format_heartbeat_event(checkpoint_type: str, elapsed_seconds: int) -> str:
+    """Format a heartbeat SSE event.
+
+    Heartbeat events are emitted every 30 seconds while the pipeline is awaiting
+    user confirmation at a checkpoint. Since graph.astream blocks during checkpoint
+    waits, heartbeats are emitted by the checkpoint node internally via logging.
+    This helper formats the SSE event for cases where heartbeat emission is possible
+    (e.g., when using an async wrapper around the checkpoint wait).
+
+    Requirements: 2.42, 2.43
+    """
+    heartbeat_data = {
+        "step": checkpoint_type,
+        "status": "heartbeat",
+        "message": f"Pipeline awaiting confirmation at checkpoint: {checkpoint_type}",
+        "data": {
+            "checkpoint_type": checkpoint_type,
+            "elapsed_seconds": elapsed_seconds,
+            "heartbeat_interval_seconds": HEARTBEAT_INTERVAL_SECONDS,
+        },
+        "timestamp": datetime.now(UTC).isoformat(),
+    }
+    return f"event: heartbeat\ndata: {json.dumps(heartbeat_data)}\n\n"
 
 
 def _extract_step_data(node_name: str, update: dict) -> dict:

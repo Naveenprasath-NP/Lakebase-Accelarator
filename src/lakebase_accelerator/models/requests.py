@@ -1,6 +1,6 @@
 """Request models for API endpoints."""
 
-from pydantic import BaseModel, ConfigDict, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from lakebase_accelerator.settings import PROMPT_MAX_LENGTH, PROMPT_MIN_LENGTH
 
@@ -81,3 +81,27 @@ class BrownFieldRequest(BaseModel):
             msg = "Project name must not exceed 100 characters"
             raise ValueError(msg)
         return v
+
+
+class ConfirmationRequest(BaseModel):
+    """Request body for POST /api/v1/projects/{project_id}/confirm.
+
+    Submits user feedback at a pipeline checkpoint.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    checkpoint_type: str
+    """The checkpoint type being confirmed (e.g., structure_review, entity_review)."""
+
+    approved: bool
+    """Whether the user approves the checkpoint data."""
+
+    corrections: dict = Field(default_factory=dict)
+    """Optional corrections to apply (section-specific key-value pairs)."""
+
+    additional_context: str = ""
+    """Optional additional context or instructions from the user."""
+
+    dismissed_items: list[str] = Field(default_factory=list)
+    """Optional list of item IDs the user wants to dismiss/skip."""

@@ -194,7 +194,7 @@ def _generate_frontend_files(entities_summary: str, data_model: dict, backend_fi
     api_contract = _extract_api_contract(backend_files, data_model)
 
     # Generate each file
-    llm_gen = get_llm(max_tokens=8192)
+    llm_gen = get_llm(max_tokens=16384)
     files: dict[str, str] = {}
 
     for file_path in file_list:
@@ -285,8 +285,16 @@ def _generate_brownfield_frontend(
 This is a BROWNFIELD migration — the goal is to recreate the prototype's UI and functionality at production quality, NOT to create a generic CRUD interface.
 
 CRITICAL REQUIREMENTS:
+- Use a DARK THEME design system:
+  - Background: #0f172a, Surface: #1e293b, Borders: #334155
+  - Primary: #3b82f6, Danger: #ef4444, Success: #22c55e
+  - Text: #f1f5f9 (primary), #94a3b8 (secondary), #64748b (muted)
+  - Inputs: bg #0f172a, border #334155, focus ring blue
+  - Buttons: rounded-lg, font-weight 600, hover shadow
+  - Cards: bg #1e293b, border #334155, rounded-xl
+- Layout: sidebar (260px) + main content (padding 32px)
 - Replicate the prototype's ACTUAL UI layout, pages, navigation, and interactions
-- Use Tailwind CSS via CDN for styling
+- Use CSS custom properties for theming
 - Use vanilla JavaScript (no framework needed for static HTML)
 - Use fetch() for ALL API calls to the backend
 - API calls must use the EXACT paths provided
@@ -297,7 +305,7 @@ CRITICAL REQUIREMENTS:
 - Include proper loading states, error handling, and empty states
 - Return ONLY the complete HTML file, no markdown fences
 
-The generated HTML should look and behave like the original prototype, just backed by the new API."""
+The generated HTML should look and behave like the original prototype, just backed by the new API and using the dark theme."""
             ),
             HumanMessage(
                 content=f"""## Prototype Context (replicate this UI faithfully)
@@ -360,12 +368,33 @@ def _generate_static_fallback(entities_summary: str, data_model: dict, api_contr
                 content="""Generate a COMPLETE single-page HTML app with inline JavaScript and CSS.
 
 REQUIREMENTS:
-- Use Tailwind CSS via CDN for styling
-- Create a tabbed interface with one tab per entity
-- Each tab has: a create form, and a list showing all records with edit/delete buttons
+- Use a DARK THEME design system with these colors:
+  - Background: #0f172a (dark navy)
+  - Surface/cards: #1e293b (slate-800)
+  - Surface hover: #334155 (slate-700)
+  - Primary button: #3b82f6 (blue-500), hover: #2563eb
+  - Danger button: #ef4444
+  - Success: #22c55e
+  - Text primary: #f1f5f9 (slate-100)
+  - Text secondary: #94a3b8 (slate-400)
+  - Text muted: #64748b (slate-500)
+  - Borders: #334155 (slate-700)
+  - Input background: #0f172a with border #334155
+  - Focus ring: box-shadow: 0 0 0 3px rgba(59,130,246,0.15)
+- Layout: sidebar navigation (260px, bg #1e293b) + main content area (padding 32px)
+- Sidebar: app name at top, nav links for each entity (active = blue tint background)
+- Tables: full-width inside cards, uppercase header labels (text-xs, letter-spacing), hover row highlight
+- Buttons: rounded-lg (8px), font-weight 600, hover lifts with shadow
+- Cards: bg #1e293b, border #334155, rounded-xl (12px), shadow
+- Forms: dark inputs (bg #0f172a, border #334155), blue focus ring, labels above
+- Font: Inter (system-ui fallback), 14px body, 24px page titles
+- All transitions: 150ms ease
+- Use CSS custom properties for theming (define :root variables)
+- Create a tabbed interface via sidebar with one section per entity
+- Each section has: a create form, and a data table showing all records with edit/delete buttons
 - Use fetch() for ALL API calls (GET, POST, PUT, DELETE)
 - API calls must use the EXACT paths provided (do not guess or change them)
-- Load data for the active tab on tab switch AND on page load for the first tab
+- Load data for the active section on nav click AND on page load for the first entity
 - Show loading states and error messages
 - All CRUD operations must work: Create, Read (list + detail), Update, Delete
 - Forms must submit JSON with Content-Type: application/json

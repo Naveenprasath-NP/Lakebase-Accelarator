@@ -49,7 +49,7 @@ def data_model_node(state: PipelineState) -> dict:
     """Design the PostgreSQL data model from extracted entities."""
     logger.info("Node: data_model_agent — designing schema", extra={"step": "data_model"})
 
-    llm = get_llm(max_tokens=8192)
+    llm = get_llm(max_tokens=16384)
 
     entities_json = json.dumps(
         {
@@ -102,4 +102,10 @@ def _parse_json(text: str) -> dict:
         text = text[3:]
     if text.endswith("```"):
         text = text[:-3]
-    return json.loads(text.strip())
+    text = text.strip()
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        # Fall back to json_repair utility for truncated/malformed responses
+        from lakebase_accelerator.utils.json_repair import parse_llm_json
+        return parse_llm_json(text)

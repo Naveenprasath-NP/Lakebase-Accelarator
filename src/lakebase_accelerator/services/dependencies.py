@@ -12,10 +12,12 @@ from lakebase_accelerator.repositories.workspace_files_repository import Workspa
 from lakebase_accelerator.services.app_deployment_service import AppDeploymentService
 from lakebase_accelerator.services.audit_service import AuditService
 from lakebase_accelerator.services.backend_generation_service import BackendGenerationService
+from lakebase_accelerator.services.error_logging_service import ErrorLoggingService
 from lakebase_accelerator.services.data_model_inference_service import DataModelInferenceService
 from lakebase_accelerator.services.deployment_config_service import DeploymentConfigService
 from lakebase_accelerator.services.frontend_generation_service import FrontendGenerationService
 from lakebase_accelerator.services.greenfield_pipeline_service import GreenFieldPipelineService
+from lakebase_accelerator.services.model_consumption_service import ModelConsumptionService
 from lakebase_accelerator.services.permission_service import PermissionService
 from lakebase_accelerator.services.prototype_ingestion_service import PrototypeIngestionService
 from lakebase_accelerator.services.requirement_intake_service import RequirementIntakeService
@@ -162,6 +164,16 @@ def get_permission_service() -> PermissionService:
 
 def get_audit_service() -> AuditService:
     return AuditService(lakebase_repo=get_lakebase_repository())
+
+
+def get_model_consumption_service() -> ModelConsumptionService:
+    """Create ModelConsumptionService with lakebase repository for DB access."""
+    return ModelConsumptionService(lakebase_repo=get_lakebase_repository())
+
+
+def get_error_logging_service() -> ErrorLoggingService:
+    """Create ErrorLoggingService with lakebase repository for DB access."""
+    return ErrorLoggingService(lakebase_repo=get_lakebase_repository())
 
 
 def get_volume_upload_service() -> VolumeUploadService:
