@@ -107,6 +107,14 @@ def integration_node(state: PipelineState) -> dict:
         bundle_files["requirements.txt"] = requirements.rstrip() + "\nhttpx==0.28.1\n"
         errors.pop()  # Remove the error since we auto-fixed
 
+    # Check requirements.txt includes email-validator if pydantic EmailStr is used
+    requirements = bundle_files.get("requirements.txt", "")
+    uses_email_str = any("EmailStr" in content for content in bundle_files.values() if isinstance(content, str))
+    if uses_email_str and "email-validator" not in requirements:
+        # Auto-fix: add email-validator
+        bundle_files["requirements.txt"] = requirements.rstrip() + "\nemail-validator==2.1.1\n"
+        logger.info("Auto-added email-validator to requirements.txt (EmailStr detected)", extra={"step": "integration"})
+
     # Check src/routes/__init__.py is just a re-export
     routes_init = bundle_files.get("src/routes/__init__.py", "")
     if routes_init and len(routes_init) > 200:
@@ -125,9 +133,19 @@ def integration_node(state: PipelineState) -> dict:
     if bundle_valid:
         import_error = _test_local_import(bundle_files)
         if import_error:
-            errors.append(f"Local import test failed: {import_error}")
-            bundle_valid = False
-            logger.warning(f"Local import test FAILED: {import_error}", extra={"step": "integration"})
+            # Skip known-safe missing dependencies that will be available at deployment
+            # (they're in requirements.txt but not installed in the accelerator's own environment)
+            known_safe_missing = ["email-validator", "email_validator", "pydantic[email]"]
+            is_known_safe = any(dep in import_error for dep in known_safe_missing)
+            if is_known_safe:
+                logger.info(
+                    f"Local import test: skipping known-safe missing dependency ({import_error})",
+                    extra={"step": "integration"},
+                )
+            else:
+                errors.append(f"Local import test failed: {import_error}")
+                bundle_valid = False
+                logger.warning(f"Local import test FAILED: {import_error}", extra={"step": "integration"})
         else:
             logger.info("Local import test PASSED", extra={"step": "integration"})
 

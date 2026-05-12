@@ -313,8 +313,20 @@ def _generate_app_tsx(
 
     The LLM only generates the React component code — all config files
     and CSS are handled by templates.
+
+    For brownfield: the prototype context drives the UI layout and design.
+    For greenfield: generates a generic sidebar CRUD interface.
     """
-    llm = get_llm(max_tokens=16384)
+    # Scale max_tokens based on complexity (number of entities)
+    tables = data_model.get("tables", [])
+    num_entities = len(tables)
+    # Complex apps (5+ entities) need more tokens to avoid truncation
+    if num_entities >= 5:
+        max_tokens = 64000
+    else:
+        max_tokens = 64000
+
+    llm = get_llm(max_tokens=max_tokens)
 
     # Build entity details for the prompt
     tables = data_model.get("tables", [])
@@ -327,7 +339,68 @@ def _generate_app_tsx(
             "columns": [{"name": c["name"], "type": c["data_type"], "nullable": c.get("nullable", True)} for c in cols],
         })
 
-    prompt = f"""Generate a COMPLETE React App.tsx component for a CRUD application.
+    if pipeline_type == "brownfield" and prototype_context:
+        # Brownfield: prototype context is the PRIMARY design instruction
+        # For complex apps, instruct LLM to focus on the visible page only
+        complexity_note = ""
+        if num_entities >= 5:
+            complexity_note = (
+                "\n\n## IMPORTANT: Keep Code Concise\n"
+                "This app has many entities. To avoid code truncation:\n"
+                "- Focus on the MAIN page shown in the prototype (e.g., the Orders list)\n"
+                "- For sidebar navigation items, show placeholder pages with just a title\n"
+                "- Only implement full CRUD for the PRIMARY entity shown in the prototype\n"
+                "- Other entities get simple list views with basic fetch\n"
+                "- Keep the code under 1500 lines total\n"
+            )
+
+        prompt = f"""Generate a COMPLETE React App.tsx component that REPLICATES the user's prototype UI.
+
+## CRITICAL: Replicate This UI Design
+{prototype_context[:4000]}{complexity_note}
+
+## IMPORTANT INSTRUCTIONS
+- You MUST replicate the prototype's EXACT layout, theme, colors, and component structure
+- Do NOT use a generic sidebar + CRUD table layout unless the prototype specifically shows one
+- Match the prototype's visual style: colors, spacing, typography, component arrangement
+- If the prototype shows a light theme, use light colors (NOT dark navy backgrounds)
+- If the prototype shows inline lists with checkboxes, build that (NOT data tables)
+- If the prototype shows filter tabs, build filter tabs (NOT sidebar navigation)
+- The UI should look like the prototype, just backed by the real API
+
+## Entities (data available via API)
+{json.dumps(entity_details, indent=2)}
+
+## API Contract
+{api_contract}
+
+## Technical Requirements
+- Export a default App component
+- Use fetch() for API calls to /api/{{entity_plural}} (same origin, relative paths)
+- Use React useState and useEffect hooks for state management
+- Include loading states — use a div with className "spinner" (shows "Loading" text spinning in a circle)
+- Include error handling (show error message if API fails)
+- After create/update/delete, refresh the data
+- Use inline styles or CSS-in-JS to match the prototype's exact theme and colors
+- You MAY also use className references from index.css where they fit the prototype's design:
+  - Buttons: "btn btn-primary", "btn btn-danger", "btn btn-secondary"
+  - States: "spinner", "empty-state"
+  - Modal: "modal-overlay", "modal", "modal-title", "modal-actions"
+- If the prototype's design conflicts with index.css classes, use inline styles to match the prototype
+- Do NOT import any CSS file (index.css is already imported in main.tsx)
+- Do NOT use Tailwind classes
+- Return ONLY the TypeScript/React code, no markdown fences
+- The file MUST be complete and syntactically valid — no truncation"""
+
+        system_msg = (
+            "You are a senior frontend developer. Generate a complete, valid React TypeScript component "
+            "that FAITHFULLY replicates the user's prototype UI design. The prototype's visual design "
+            "takes priority over any generic patterns. Match the layout, theme, colors, and interactions "
+            "shown in the prototype. Return ONLY code, no markdown."
+        )
+    else:
+        # Greenfield: generic CRUD interface with sidebar layout
+        prompt = f"""Generate a COMPLETE React App.tsx component for a CRUD application.
 
 ## Entities
 {json.dumps(entity_details, indent=2)}
@@ -344,7 +417,7 @@ def _generate_app_tsx(
 - Show the active entity's data in the main content area
 - Tables should show all columns (except id, created_at, updated_at)
 - Forms should have inputs for all editable columns
-- Include loading states (show "Loading..." while fetching)
+- Include loading states — use a div with className "spinner" (shows "Loading" text spinning in a circle)
 - Include error handling (show error message if API fails)
 - After create/update/delete, refresh the list
 - Use className references to the CSS classes defined in index.css:
@@ -361,12 +434,11 @@ def _generate_app_tsx(
 - Return ONLY the TypeScript/React code, no markdown fences
 - The file MUST be complete and syntactically valid — no truncation"""
 
-    if pipeline_type == "brownfield" and prototype_context:
-        prompt += f"\n\n## Prototype Context (replicate this UI)\n{prototype_context[:3000]}"
+        system_msg = "Generate a complete, valid React TypeScript component. Return ONLY code, no markdown. The component must compile without errors."
 
     response = llm.invoke(
         [
-            SystemMessage(content="Generate a complete, valid React TypeScript component. Return ONLY code, no markdown. The component must compile without errors."),
+            SystemMessage(content=system_msg),
             HumanMessage(content=prompt),
         ]
     )
@@ -504,27 +576,23 @@ def _generate_brownfield_frontend(
 This is a BROWNFIELD migration — the goal is to recreate the prototype's UI and functionality at production quality, NOT to create a generic CRUD interface.
 
 CRITICAL REQUIREMENTS:
-- Use a DARK THEME design system:
-  - Background: #0f172a, Surface: #1e293b, Borders: #334155
-  - Primary: #3b82f6, Danger: #ef4444, Success: #22c55e
-  - Text: #f1f5f9 (primary), #94a3b8 (secondary), #64748b (muted)
-  - Inputs: bg #0f172a, border #334155, focus ring blue
-  - Buttons: rounded-lg, font-weight 600, hover shadow
-  - Cards: bg #1e293b, border #334155, rounded-xl
-- Layout: sidebar (260px) + main content (padding 32px)
-- Replicate the prototype's ACTUAL UI layout, pages, navigation, and interactions
+- REPLICATE the prototype's EXACT visual design: theme, colors, layout, and component structure
+- If the prototype uses a LIGHT theme, use light colors (cream/white backgrounds, dark text)
+- If the prototype uses a DARK theme, use dark colors (navy backgrounds, light text)
+- Do NOT force a dark theme if the prototype shows a light theme
+- Match the prototype's layout: if it shows a single-page list, build that (NOT a sidebar + tables)
+- Match the prototype's interactions: checkboxes, filter tabs, inline editing, etc.
 - Use CSS custom properties for theming
 - Use vanilla JavaScript (no framework needed for static HTML)
 - Use fetch() for ALL API calls to the backend
 - API calls must use the EXACT paths provided
-- Include ALL features described in the prototype (dashboards, charts, forms, lists, etc.)
-- If the prototype has charts/visualizations, use Chart.js via CDN
-- If the prototype has tabs/navigation, replicate that structure
+- Include ALL features described in the prototype (filters, badges, clear completed, etc.)
+- Loading state: show a spinning circle with "Loading" text inside it (text rotates with the circle)
 - Make it responsive and production-quality
 - Include proper loading states, error handling, and empty states
 - Return ONLY the complete HTML file, no markdown fences
 
-The generated HTML should look and behave like the original prototype, just backed by the new API and using the dark theme."""
+The generated HTML should look and behave like the original prototype, just backed by the new API."""
             ),
             HumanMessage(
                 content=f"""## Prototype Context (replicate this UI faithfully)

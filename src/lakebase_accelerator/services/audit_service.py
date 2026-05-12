@@ -52,11 +52,10 @@ class AuditService:
         project_id: str,
         app_name: str,
         app_url: str,
-        service_principal_id: str,
         tables_created: list[str],
         pipeline_duration_seconds: float,
-        total_token_usage: int,
         schema_name: str = "",
+        project_name: str = "",
     ) -> None:
         """Update project record on successful completion."""
         logger.info(
@@ -64,31 +63,37 @@ class AuditService:
             extra={"step": "audit", "project_id": project_id},
         )
 
+        set_parts = [
+            "status = 'completed'",
+            "app_name = %s",
+            "app_url = %s",
+            "schema_name = %s",
+            "generated_tables = %s::jsonb",
+            "pipeline_duration_seconds = %s",
+            "modified_at = NOW()",
+        ]
+        params: list = [
+            app_name,
+            app_url,
+            schema_name,
+            str(tables_created).replace("'", '"'),
+            pipeline_duration_seconds,
+        ]
+
+        if project_name:
+            set_parts.append("project_name = %s")
+            params.append(project_name)
+
+        params.append(project_id)
+
         self._repo.execute_query(
             ACCELERATOR_META_SCHEMA,
-            """
+            f"""
             UPDATE accelerator_meta.projects
-            SET status = 'completed',
-                app_name = %s,
-                app_url = %s,
-                schema_name = %s,
-                service_principal_id = %s,
-                generated_tables = %s::jsonb,
-                pipeline_duration_seconds = %s,
-                total_token_usage = %s,
-                modified_at = NOW()
+            SET {', '.join(set_parts)}
             WHERE id = %s::uuid
             """,
-            (
-                app_name,
-                app_url,
-                schema_name,
-                service_principal_id,
-                str(tables_created).replace("'", '"'),
-                pipeline_duration_seconds,
-                total_token_usage,
-                project_id,
-            ),
+            tuple(params),
         )
 
     async def update_project_failed(
@@ -171,8 +176,9 @@ class AuditService:
             ACCELERATOR_META_SCHEMA,
             """
             SELECT id::text, project_name, mode, status, prompt, app_name, app_url,
-                   schema_name, generated_tables, pipeline_duration_seconds,
-                   total_token_usage, failure_step, failure_message,
+                   schema_name, generated_tables, chat_history,
+                   pipeline_duration_seconds,
+                   failure_step, failure_message,
                    created_at, modified_at
             FROM accelerator_meta.projects
             WHERE id = %s::uuid
@@ -180,3 +186,39 @@ class AuditService:
             (project_id,),
         )
         return rows[0] if rows else None
+
+    async def append_chat_message(
+        self,
+        project_id: str,
+        role: str,
+        content: str,
+        message_type: str = "message",
+    ) -> None:
+        """Append a chat message to the project's chat_history.
+
+        Args:
+            project_id: UUID of the project.
+            role: "user" or "agent".
+            content: Message content (text or markdown).
+            message_type: Type of message (message, checkpoint_summary, checkpoint_approval, pipeline_complete).
+        """
+        import json as _json
+        from datetime import datetime, UTC
+
+        message = _json.dumps({
+            "role": role,
+            "content": content,
+            "type": message_type,
+            "timestamp": datetime.now(UTC).isoformat(),
+        })
+
+        self._repo.execute_query(
+            ACCELERATOR_META_SCHEMA,
+            """
+            UPDATE accelerator_meta.projects
+            SET chat_history = chat_history || %s::jsonb,
+                modified_at = NOW()
+            WHERE id = %s::uuid
+            """,
+            (message, project_id),
+        )

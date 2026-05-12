@@ -41,7 +41,6 @@ router = APIRouter(prefix="/api/v1/projects", tags=["Projects"])
 async def execute_pipeline(
     type: str = Form(...),
     prompt: str = Form(...),
-    project_name: str | None = Form(None),
     files: list[UploadFile] | None = File(None),
 ) -> StreamingResponse | JSONResponse:
     """Execute the accelerator pipeline via multi-agent LangGraph orchestrator.
@@ -103,11 +102,12 @@ async def execute_pipeline(
         resp = error_response(message="Pipeline not available. Check dependencies.", status_code=503)
         return JSONResponse(status_code=503, content=resp.model_dump())
 
-    # Initial state
+    # Initial state (project_id injected after audit record creation)
     initial_state = {
         "messages": [],
         "prompt": prompt,
-        "project_name": project_name or "",
+        "project_name": "",
+        "project_id": "",
         "pipeline_type": type,
         "volume_paths": volume_paths,
         "is_sufficient": True,
@@ -147,22 +147,51 @@ async def execute_pipeline(
         try:
             audit = get_audit_service()
             project_id = await audit.create_project_record(
-                project_name=project_name or "unnamed-project",
+                project_name="",
                 schema_name="",
                 mode=type,
                 prompt=prompt,
             )
+            # Inject project_id into pipeline state so checkpoint can use it
+            initial_state["project_id"] = project_id or ""
             logger.info(f"Audit record created: {project_id}", extra={"step": "audit"})
+
+            # Save user prompt as first chat message
+            if project_id:
+                await audit.append_chat_message(
+                    project_id=project_id,
+                    role="user",
+                    content=prompt,
+                    message_type="message",
+                )
         except Exception as e:
             logger.warning(f"Failed to create audit record: {e}")
 
         try:
             final_update = {}
 
+            # Accumulate key data from steps (for DB save + pipeline_complete SSE)
+            accumulated_schema_name = ""
+            accumulated_table_names: list[str] = []
+            accumulated_app_url = ""
+            accumulated_app_name = ""
+            accumulated_project_name = ""
+
             # Stream node-by-node updates
             async for event in graph.astream(initial_state, stream_mode="updates"):
                 # event is a dict of {node_name: state_update}
                 for node_name, update in event.items():
+                    # Accumulate data from specific steps
+                    if update.get("schema_name"):
+                        accumulated_schema_name = update["schema_name"]
+                    if update.get("table_names"):
+                        accumulated_table_names = update["table_names"]
+                    if update.get("app_url"):
+                        accumulated_app_url = update["app_url"]
+                    if update.get("app_name"):
+                        accumulated_app_name = update["app_name"]
+                    if update.get("project_name"):
+                        accumulated_project_name = update["project_name"]
                     final_update = update  # Track last update for final state
                     current_step = update.get("current_step", node_name)
                     error = update.get("error", "")
@@ -219,6 +248,28 @@ async def execute_pipeline(
                         }
                         yield f"event: confirmation_received\ndata: {json.dumps(confirmed_data)}\n\n"
 
+                        # Save user confirmation to chat history
+                        if project_id:
+                            try:
+                                corrections = update.get("user_corrections", {})
+                                if corrections:
+                                    user_feedback = corrections.get("user_feedback", str(corrections))
+                                    await audit.append_chat_message(
+                                        project_id=project_id,
+                                        role="user",
+                                        content=user_feedback,
+                                        message_type="checkpoint_correction",
+                                    )
+                                else:
+                                    await audit.append_chat_message(
+                                        project_id=project_id,
+                                        role="user",
+                                        content="Approved",
+                                        message_type="checkpoint_approval",
+                                    )
+                            except Exception:
+                                pass
+
                         resumed_data = {
                             "step": current_step,
                             "status": "resumed",
@@ -264,27 +315,42 @@ async def execute_pipeline(
                         }
                         if node_name in _checkpoint_after:
                             checkpoint_type = _checkpoint_after[node_name]
-                            # Build checkpoint data from the step's output
-                            cp_data = {
-                                "entities": update.get("entities", []),
-                                "relationships": update.get("relationships", []),
-                                "project_name": update.get("project_name", ""),
-                            }
-                            if node_name == "brownfield_exploration":
-                                cp_data["project_structure"] = update.get("project_structure", {})
-                                cp_data["tech_stack"] = update.get("tech_stack", {})
+                            checkpoint_project_name = update.get("project_name", accumulated_project_name)
+
+                            # Generate LLM summary for the checkpoint approval UI
+                            summary_md = _generate_checkpoint_summary(
+                                entities=update.get("entities", []),
+                                relationships=update.get("relationships", []),
+                                tech_stack=update.get("tech_stack", {}),
+                                project_name=checkpoint_project_name,
+                                pipeline_type=type,
+                            )
 
                             awaiting_data = {
                                 "step": checkpoint_type,
                                 "status": "awaiting_confirmation",
                                 "message": f"Awaiting user confirmation at checkpoint: {checkpoint_type}",
+                                "project_id": project_id,
+                                "project_name": checkpoint_project_name,
                                 "data": {
                                     "checkpoint_type": checkpoint_type,
-                                    "checkpoint_data": cp_data,
+                                    "summary": summary_md,
                                 },
                                 "timestamp": datetime.now(UTC).isoformat(),
                             }
                             yield f"event: awaiting_confirmation\ndata: {json.dumps(awaiting_data)}\n\n"
+
+                            # Save checkpoint summary to chat history
+                            if project_id:
+                                try:
+                                    await audit.append_chat_message(
+                                        project_id=project_id,
+                                        role="agent",
+                                        content=summary_md,
+                                        message_type="checkpoint_summary",
+                                    )
+                                except Exception:
+                                    pass
 
             # Pipeline complete — use the last update to determine outcome
             pipeline_duration = _time.time() - pipeline_start
@@ -321,18 +387,17 @@ async def execute_pipeline(
                     "timestamp": datetime.now(UTC).isoformat(),
                 }
             else:
-                # Update audit: completed
+                # Update audit: completed — use accumulated values from all steps
                 if project_id:
                     try:
                         await audit.update_project_completed(
                             project_id=project_id,
-                            app_name=final_update.get("app_name", ""),
-                            app_url=final_update.get("app_url", ""),
-                            service_principal_id=final_update.get("service_principal_id", ""),
-                            tables_created=final_update.get("table_names", []),
+                            app_name=accumulated_app_name or final_update.get("app_name", ""),
+                            app_url=accumulated_app_url or final_update.get("app_url", ""),
+                            tables_created=accumulated_table_names or final_update.get("table_names", []),
                             pipeline_duration_seconds=pipeline_duration,
-                            total_token_usage=0,
-                            schema_name=final_update.get("schema_name", ""),
+                            schema_name=accumulated_schema_name or final_update.get("schema_name", ""),
+                            project_name=accumulated_project_name,
                         )
                     except Exception:
                         pass
@@ -342,11 +407,11 @@ async def execute_pipeline(
                     "status": "completed",
                     "message": "App deployed successfully",
                     "data": {
-                        "app_url": final_update.get("app_url", ""),
-                        "app_name": final_update.get("app_name", ""),
-                        "schema_name": final_update.get("schema_name", ""),
+                        "app_url": accumulated_app_url or final_update.get("app_url", ""),
+                        "app_name": accumulated_app_name or final_update.get("app_name", ""),
+                        "schema_name": accumulated_schema_name or final_update.get("schema_name", ""),
                         "catalog": "lakebase_accelerator_poc",
-                        "tables_created": final_update.get("table_names", []),
+                        "tables_created": accumulated_table_names or final_update.get("table_names", []),
                         "completed_steps": final_update.get("completed_steps", []),
                         "pipeline_duration_seconds": round(pipeline_duration, 1),
                     },
@@ -381,7 +446,13 @@ async def execute_pipeline(
     return StreamingResponse(
         event_stream(),
         media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"},
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+            "Transfer-Encoding": "chunked",
+            "Content-Encoding": "identity",
+        },
     )
 
 
@@ -469,8 +540,8 @@ async def get_project_detail(project_id: str) -> JSONResponse:
         schema_name=row.get("schema_name"),
         catalog=settings.catalog_name if row.get("schema_name") else None,
         tables_created=row.get("generated_tables") or [],
+        chat_history=row.get("chat_history") or [],
         pipeline_duration_seconds=row.get("pipeline_duration_seconds"),
-        total_token_usage=row.get("total_token_usage"),
         steps=[],
         created_at=row["created_at"].isoformat() if hasattr(row["created_at"], "isoformat") else str(row["created_at"]),
         updated_at=(row.get("modified_at") or row["created_at"]).isoformat() if hasattr((row.get("modified_at") or row["created_at"]), "isoformat") else str(row.get("modified_at") or row["created_at"]),
@@ -488,17 +559,12 @@ async def get_project_detail(project_id: str) -> JSONResponse:
 async def confirm_checkpoint(project_id: str, body: ConfirmationRequest) -> JSONResponse:
     """Submit user confirmation for a pipeline checkpoint.
 
-    Validates that the pipeline is awaiting confirmation and that the
-    checkpoint_type matches the current pending checkpoint. Signals the
-    waiting checkpoint node to resume via asyncio.Event.
+    The project_id is the UUID returned in the awaiting_confirmation SSE event.
 
     Returns:
         200: Confirmation submitted successfully.
         409: Pipeline is not awaiting confirmation or checkpoint_type mismatch.
-
-    Requirements: 2.38, 2.39, 2.40, 2.41
     """
-    # Check if the project is awaiting confirmation
     if not is_awaiting_confirmation(project_id):
         resp = error_response(
             message=f"Project '{project_id}' is not awaiting confirmation",
@@ -611,3 +677,124 @@ def _step_message(node_name: str, update: dict) -> str:
         "deployment": f"Deployed: {update.get('app_url', '')}",
     }
     return messages.get(node_name, f"Completed: {node_name}")
+
+
+def _generate_checkpoint_summary(
+    entities: list[dict],
+    relationships: list[dict],
+    tech_stack: dict,
+    project_name: str,
+    pipeline_type: str,
+) -> str:
+    """Generate a business-level markdown summary for the checkpoint approval UI.
+
+    The LLM produces a concise, user-friendly overview of what will be built —
+    focused on the application's purpose, features, and plan rather than
+    technical schema details.
+
+    Args:
+        entities: List of entity dicts with name, description, attributes.
+        relationships: List of relationship dicts.
+        tech_stack: Tech stack dict (language, framework, etc.).
+        project_name: Project name for display.
+        pipeline_type: "greenfield" or "brownfield".
+
+    Returns:
+        Markdown string ready for FE rendering.
+    """
+    from lakebase_accelerator.agent.llm import get_llm
+
+    # Build context for the LLM
+    entity_lines = []
+    for e in entities:
+        attrs = e.get("attributes", [])
+        attr_names = [a["name"] for a in attrs if a["name"] not in ("id", "created_at", "updated_at")]
+        entity_lines.append(f"- {e.get('name', 'unnamed')}: {e.get('description', '')} (fields: {', '.join(attr_names)})")
+
+    rel_lines = []
+    for r in relationships:
+        rel_lines.append(f"- {r.get('from_entity', '')} → {r.get('to_entity', '')} ({r.get('cardinality', '')})")
+
+    tech_info = ""
+    if tech_stack:
+        tech_parts = [f"{k}: {v}" for k, v in tech_stack.items() if v and k in ("language", "framework", "frontend", "orm")]
+        tech_info = ", ".join(tech_parts)
+
+    display_name = project_name.replace("-", " ").replace("_", " ").title() if project_name else "Your Application"
+
+    prompt = f"""Generate a business-level summary for a user to review before we build their application.
+
+## Context
+- Application: {display_name}
+- Pipeline: {pipeline_type}
+- Tech Stack: {tech_info or "Not specified"}
+
+## Discovered Entities
+{chr(10).join(entity_lines)}
+
+## Relationships
+{chr(10).join(rel_lines) if rel_lines else "None"}
+
+## Instructions
+Write a markdown summary that reads like a project brief — NOT a technical schema review. Include:
+
+1. **Application Overview** — What this app does in 2-3 sentences (from the user's perspective, not developer's)
+2. **Key Features** — Bullet list of what the app will support (based on entities and relationships)
+3. **What I'll Build** — Brief description of what will be generated:
+   - Database with {len(entities)} tables
+   - REST API with full CRUD endpoints
+   - React frontend with the UI
+   - Deployment to Databricks Apps
+4. End with: "Click **Approve & Continue** to proceed, or edit the summary to make changes."
+
+Keep it conversational and concise. Focus on WHAT the app does for the user, not HOW the database is structured.
+Do NOT list column names or data types. Do NOT say "schema review".
+Return ONLY the markdown, no code fences."""
+
+    try:
+        llm = get_llm(max_tokens=2048)
+        response = llm.invoke(prompt)
+        summary = response.content.strip()
+        if summary.startswith("```"):
+            summary = summary.split("\n", 1)[1] if "\n" in summary else summary[3:]
+        if summary.endswith("```"):
+            summary = summary[:-3].rstrip()
+        return summary
+    except Exception as e:
+        logger.warning(f"LLM summary generation failed, using fallback: {e}")
+        return _fallback_checkpoint_summary(entities, relationships, tech_stack, display_name)
+
+
+def _fallback_checkpoint_summary(
+    entities: list[dict],
+    relationships: list[dict],
+    tech_stack: dict,
+    display_name: str,
+) -> str:
+    """Fallback summary when LLM call fails."""
+    parts = [f"## {display_name}\n"]
+    parts.append("Here's what I'm planning to build:\n")
+
+    parts.append("**Key Features:**\n")
+    for e in entities:
+        name = e.get("name", "unnamed").replace("_", " ").title()
+        desc = e.get("description", "")
+        if desc:
+            parts.append(f"- {desc}")
+        else:
+            parts.append(f"- {name} management")
+
+    parts.append(f"\n**What I'll generate:**")
+    parts.append(f"- Database with {len(entities)} tables and {len(relationships)} relationships")
+    parts.append(f"- REST API with full CRUD endpoints")
+    parts.append(f"- React frontend UI")
+    parts.append(f"- Deployment to Databricks Apps")
+
+    if tech_stack:
+        framework = tech_stack.get("framework", "")
+        language = tech_stack.get("language", "")
+        if framework or language:
+            parts.append(f"\n*Detected tech: {' + '.join(filter(None, [framework, language]))}*")
+
+    parts.append("\n---\nClick **Approve & Continue** to proceed, or edit the summary to make changes.")
+    return "\n".join(parts)

@@ -242,7 +242,7 @@ async def _await_checkpoint(
     Returns:
         Dict of state updates to merge into PipelineState.
     """
-    project_id = state.get("project_name", "unknown")
+    project_id = state.get("project_id") or state.get("project_name", "unknown")
 
     logger.info(
         f"Checkpoint '{checkpoint_type}' reached for project_id={project_id}",

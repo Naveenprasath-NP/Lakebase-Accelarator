@@ -168,7 +168,7 @@ async def brownfield_exploration_node(state: PipelineState) -> dict:
         extra={"step": "brownfield_exploration", "volume_paths": len(state.get("volume_paths", []))},
     )
 
-    project_id = state.get("project_name", "") or "00000000-0000-0000-0000-000000000000"
+    project_id = state.get("project_id", "") or state.get("project_name", "")
     volume_paths = state.get("volume_paths", [])
 
     if not volume_paths:
@@ -285,12 +285,18 @@ async def brownfield_exploration_node(state: PipelineState) -> dict:
         },
     )
 
+    # ─── Step 6: Build prototype_context from exploration results ──────
+    # This ensures image-only uploads (no code files) still produce a
+    # rich prototype_context for downstream frontend/backend generation.
+    prototype_context = _build_prototype_context_from_exploration(result, image_files)
+
     return {
         "project_name": project_name,
         "entities": entities,
         "relationships": relationships,
         "project_structure": project_structure,
         "tech_stack": tech_stack,
+        "prototype_context": prototype_context,
         "tool_call_count": tool_call_count,
         "total_input_tokens": total_input_tokens,
         "total_output_tokens": total_output_tokens,
@@ -709,6 +715,100 @@ def _build_multimodal_message(
         })
 
     return content_blocks
+
+
+def _build_prototype_context_from_exploration(result: dict, image_files: dict[str, bytes] | None = None) -> str:
+    """Build prototype_context from brownfield exploration results.
+
+    This ensures that when images are uploaded (no code files), the UI analysis
+    from the vision model is captured as prototype_context for downstream nodes
+    (frontend_dev, backend_dev) to use.
+
+    Args:
+        result: Parsed JSON output from the exploration agent.
+        image_files: Dict of image filenames (used to determine if this was image-based).
+
+    Returns:
+        A rich prototype_context string describing the UI and features.
+    """
+    parts = []
+
+    # UI Structure (critical for frontend_dev — extracted from image analysis)
+    ui_structure = result.get("ui_structure", {})
+    if ui_structure:
+        parts.append("## UI Structure")
+        if ui_structure.get("pages"):
+            parts.append(f"Pages/Views: {', '.join(ui_structure['pages'])}")
+        if ui_structure.get("components"):
+            parts.append(f"Key Components: {', '.join(ui_structure['components'])}")
+        if ui_structure.get("navigation"):
+            parts.append(f"Navigation: {ui_structure['navigation']}")
+        if ui_structure.get("data_sources"):
+            parts.append(f"Data Sources: {json.dumps(ui_structure['data_sources'])}")
+        # Include any additional UI details the LLM may have provided
+        for key, value in ui_structure.items():
+            if key not in ("pages", "components", "navigation", "data_sources") and value:
+                parts.append(f"{key.replace('_', ' ').title()}: {value}")
+        parts.append("")
+
+    # API Endpoints (for backend_dev)
+    api_endpoints = result.get("api_endpoints", [])
+    if api_endpoints:
+        parts.append("## API Endpoints")
+        for ep in api_endpoints:
+            method = ep.get("method", "GET")
+            path = ep.get("path", "/")
+            desc = ep.get("description", "")
+            parts.append(f"- {method} {path} — {desc}")
+            if ep.get("request_body"):
+                parts.append(f"  Request: {ep['request_body']}")
+            if ep.get("response_shape"):
+                parts.append(f"  Response: {ep['response_shape']}")
+        parts.append("")
+
+    # Business Logic
+    business_logic = result.get("business_logic", [])
+    if business_logic:
+        parts.append("## Business Logic")
+        if isinstance(business_logic, list):
+            for rule in business_logic:
+                name = rule.get("name", "")
+                desc = rule.get("description", "")
+                parts.append(f"- {name}: {desc}")
+        elif isinstance(business_logic, str):
+            parts.append(business_logic)
+        parts.append("")
+
+    # Tech Stack
+    tech_stack = result.get("tech_stack", {})
+    if tech_stack:
+        parts.append("## Original Tech Stack")
+        if isinstance(tech_stack, dict):
+            for key, value in tech_stack.items():
+                if value:
+                    parts.append(f"- {key}: {value}")
+        elif isinstance(tech_stack, str):
+            parts.append(tech_stack)
+        parts.append("")
+
+    # Production Gaps
+    production_gaps = result.get("production_gaps", [])
+    if production_gaps:
+        parts.append("## Production Gaps to Address")
+        for gap in production_gaps:
+            severity = gap.get("severity", "medium")
+            category = gap.get("category", "")
+            desc = gap.get("description", "")
+            parts.append(f"- [{severity}] {category}: {desc}")
+        parts.append("")
+
+    # If this was an image-only upload, add a note for downstream nodes
+    if image_files and not result.get("project_structure", {}).get("root_files"):
+        parts.insert(0, "## Source: UI Screenshot Analysis\n"
+                       "This prototype context was derived from analyzing uploaded UI screenshots. "
+                       "The frontend should replicate the visual design shown in the screenshots.\n")
+
+    return "\n".join(parts)
 
 
 def _derive_project_name(project_structure: dict, tech_stack: dict) -> str:

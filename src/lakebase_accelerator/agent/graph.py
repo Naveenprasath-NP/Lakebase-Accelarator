@@ -47,6 +47,28 @@ def _route_after_intake(state: PipelineState) -> Literal["analysis_review_checkp
     return END
 
 
+def _route_after_analysis_checkpoint(state: PipelineState) -> Literal["design_model", "brownfield_exploration", "intake", "__end__"]:
+    """Route after analysis review checkpoint.
+
+    - If approved (no corrections): proceed to design_model
+    - If corrections provided: route back to the appropriate exploration/intake node
+    - If error (timeout): end
+    """
+    error = state.get("error", "")
+    if error:
+        return END
+
+    user_corrections = state.get("user_corrections", {})
+    if user_corrections:
+        # User provided corrections — re-run analysis with corrections
+        pipeline_type = state.get("pipeline_type", "greenfield")
+        if pipeline_type == "brownfield":
+            return "brownfield_exploration"
+        return "intake"
+
+    return "design_model"
+
+
 def _route_after_integration(state: PipelineState) -> Literal["deployment", "backend_dev", "__end__"]:
     """Route after integration: deploy if valid, retry backend if fixable, end if fatal."""
     error = state.get("error", "")
@@ -127,8 +149,12 @@ def build_pipeline_graph() -> StateGraph:
     # ─── Brownfield path ─────────────────────────────────────────────
     builder.add_edge("brownfield_exploration", "analysis_review_checkpoint")
 
-    # ─── Single checkpoint → design_model ────────────────────────────
-    builder.add_edge("analysis_review_checkpoint", "design_model")
+    # ─── Single checkpoint → conditional routing ────────────────────────
+    builder.add_conditional_edges(
+        "analysis_review_checkpoint",
+        _route_after_analysis_checkpoint,
+        ["design_model", "brownfield_exploration", "intake", END],
+    )
 
     # ─── Shared pipeline (both paths converge at design_model) ───────
     builder.add_edge("design_model", "schema_provisioning")

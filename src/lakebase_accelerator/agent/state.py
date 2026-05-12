@@ -20,6 +20,7 @@ class PipelineState(TypedDict):
     # ─── Input ───────────────────────────────────────────────────────
     prompt: str
     project_name: str
+    project_id: str  # audit UUID from DB
     pipeline_type: str  # "greenfield" or "brownfield"
     volume_paths: list[str]  # brownfield file paths
 

@@ -104,7 +104,30 @@ async def prototype_analysis_node(state: PipelineState) -> dict:
         file_contents = await volume_reader.read_prototype_files(volume_paths)
     except Exception as e:
         logger.warning(f"Failed to re-read files for analysis: {e}")
-        # Non-fatal — continue with empty context
+        # Non-fatal — preserve existing prototype_context from exploration step
+        existing_context = state.get("prototype_context", "")
+        return {
+            "prototype_context": existing_context,
+            "extracted_seed_data": {},
+            "current_step": "prototype_analysis",
+            "completed_steps": state.get("completed_steps", []) + ["prototype_analysis"],
+        }
+
+    # If no readable text files (e.g., image-only upload), preserve existing context
+    if not file_contents:
+        existing_context = state.get("prototype_context", "")
+        if existing_context:
+            logger.info(
+                "No text files for analysis, preserving prototype_context from exploration step",
+                extra={"step": "prototype_analysis", "context_length": len(existing_context)},
+            )
+            return {
+                "prototype_context": existing_context,
+                "extracted_seed_data": {},
+                "current_step": "prototype_analysis",
+                "completed_steps": state.get("completed_steps", []) + ["prototype_analysis"],
+            }
+        logger.warning("No readable files and no existing prototype_context")
         return {
             "prototype_context": "",
             "extracted_seed_data": {},
@@ -147,7 +170,16 @@ async def prototype_analysis_node(state: PipelineState) -> dict:
 
     # 6. Build prototype context for downstream nodes
     seed_data = result.get("seed_data", {})
-    prototype_context = _build_prototype_context(result)
+    new_context = _build_prototype_context(result)
+
+    # Merge with existing prototype_context from exploration step (if any)
+    existing_context = state.get("prototype_context", "")
+    if existing_context and new_context:
+        prototype_context = f"{existing_context}\n\n{new_context}"
+    elif new_context:
+        prototype_context = new_context
+    else:
+        prototype_context = existing_context
 
     logger.info(
         f"Prototype analysis complete: seed_data_tables={len(seed_data)}, "

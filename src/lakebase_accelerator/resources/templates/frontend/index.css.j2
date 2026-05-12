@@ -180,7 +180,15 @@ body {
 .badge-danger { background: rgba(239,68,68,0.1); color: var(--brand-danger); border: 1px solid rgba(239,68,68,0.2); }
 
 /* ── Loading ── */
-.spinner { width: 20px; height: 20px; border: 2px solid var(--border-default); border-top-color: var(--brand-primary); border-radius: 50%; animation: spin 0.6s linear infinite; margin: 40px auto; }
+.spinner {
+  width: 40px;
+  height: 40px;
+  border: 3px solid var(--border-default);
+  border-top-color: var(--brand-primary);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+  margin: 40px auto;
+}
 @keyframes spin { to { transform: rotate(360deg); } }
 
 /* ── Empty State ── */
