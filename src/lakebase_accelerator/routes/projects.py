@@ -138,6 +138,7 @@ async def execute_pipeline(
 
     async def event_stream():
         """Stream SSE events as the pipeline graph executes."""
+        import asyncio
         import time as _time
 
         pipeline_start = _time.time()
@@ -151,6 +152,10 @@ async def execute_pipeline(
                 schema_name="",
                 mode=type,
                 prompt=prompt,
+                uploaded_files=[
+                    {"name": path.rsplit("/", 1)[-1], "volume_path": path}
+                    for path in volume_paths
+                ] if volume_paths else None,
             )
             # Inject project_id into pipeline state so checkpoint can use it
             initial_state["project_id"] = project_id or ""
@@ -177,8 +182,39 @@ async def execute_pipeline(
             accumulated_app_name = ""
             accumulated_project_name = ""
 
-            # Stream node-by-node updates
-            async for event in graph.astream(initial_state, stream_mode="updates"):
+            # Stream node-by-node updates with heartbeat to prevent proxy timeout
+            HEARTBEAT_INTERVAL = 15  # seconds — keep connection alive during long LLM calls
+            last_event_time = _time.time()
+
+            async def heartbeat_generator():
+                """Wrap graph.astream with periodic heartbeats to prevent HTTP/2 proxy timeouts."""
+                nonlocal last_event_time
+                stream = graph.astream(initial_state, stream_mode="updates")
+
+                while True:
+                    try:
+                        # Wait for next graph event with a timeout
+                        event = await asyncio.wait_for(stream.__anext__(), timeout=HEARTBEAT_INTERVAL)
+                        last_event_time = _time.time()
+                        yield ("event", event)
+                    except asyncio.TimeoutError:
+                        # No event received within interval — emit heartbeat to keep connection alive
+                        yield ("heartbeat", None)
+                    except StopAsyncIteration:
+                        break
+
+            async for event_type, event in heartbeat_generator():
+                if event_type == "heartbeat":
+                    heartbeat_data = {
+                        "step": "processing",
+                        "status": "heartbeat",
+                        "message": "Pipeline is processing...",
+                        "data": {"elapsed_seconds": round(_time.time() - pipeline_start)},
+                        "timestamp": datetime.now(UTC).isoformat(),
+                    }
+                    yield f"event: heartbeat\ndata: {json.dumps(heartbeat_data)}\n\n"
+                    continue
+
                 # event is a dict of {node_name: state_update}
                 for node_name, update in event.items():
                     # Accumulate data from specific steps
@@ -540,6 +576,7 @@ async def get_project_detail(project_id: str) -> JSONResponse:
         schema_name=row.get("schema_name"),
         catalog=settings.catalog_name if row.get("schema_name") else None,
         tables_created=row.get("generated_tables") or [],
+        uploaded_files=row.get("uploaded_files") or [],
         chat_history=row.get("chat_history") or [],
         pipeline_duration_seconds=row.get("pipeline_duration_seconds"),
         steps=[],
