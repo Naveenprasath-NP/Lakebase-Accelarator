@@ -11,6 +11,25 @@ from langgraph.graph import add_messages
 from typing_extensions import TypedDict
 
 
+def _last_non_empty(existing: str, new: str) -> str:
+    """Reducer for string fields that may be written by parallel nodes.
+
+    Keeps the last non-empty value. If both write, last one wins.
+    """
+    return new if new else existing
+
+
+def _merge_completed_steps(existing: list[str], new: list[str]) -> list[str]:
+    """Reducer for completed_steps — merges without duplicates, preserving order."""
+    seen = set(existing)
+    merged = list(existing)
+    for step in new:
+        if step not in seen:
+            merged.append(step)
+            seen.add(step)
+    return merged
+
+
 class PipelineState(TypedDict):
     """Full state for the greenfield/brownfield pipeline."""
 
@@ -80,9 +99,9 @@ class PipelineState(TypedDict):
     dismissed_items: list[str]  # items user dismissed
 
     # ─── Progress ────────────────────────────────────────────────────
-    current_step: str
-    completed_steps: list[str]
-    error: str
+    current_step: Annotated[str, _last_non_empty]
+    completed_steps: Annotated[list[str], _merge_completed_steps]
+    error: Annotated[str, _last_non_empty]
 
     # ─── Theme ───────────────────────────────────────────────────────
     theme: dict  # {"mode": "dark"|"light", "brand_color": "#hex", "brand_name": "color_name"}

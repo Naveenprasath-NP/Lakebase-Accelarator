@@ -128,7 +128,12 @@ When you have completed your exploration, respond with a JSON object (no markdow
       "severity": "critical|high|medium|low"
     }
   ],
-  "seed_data_locations": ["file paths containing seed/fixture/hardcoded data"]
+  "seed_data_locations": ["file paths containing seed/fixture/hardcoded data"],
+  "theme": {
+    "mode": "dark or light — detect from UI screenshots or CSS. Use 'light' if background is white/light-colored, 'dark' if background is dark/navy/black",
+    "brand_color": "#hex — primary/accent color detected from the UI (buttons, active nav items, links)",
+    "brand_name": "human-readable color name (e.g., red, green, blue, orange, purple)"
+  }
 }
 
 Ensure every entity has id (UUID PK), created_at (TIMESTAMPTZ), and updated_at (TIMESTAMPTZ) attributes. \
@@ -290,6 +295,12 @@ async def brownfield_exploration_node(state: PipelineState) -> dict:
     # rich prototype_context for downstream frontend/backend generation.
     prototype_context = _build_prototype_context_from_exploration(result, image_files)
 
+    # ─── Step 7: Extract theme from exploration results ───────────────
+    theme = result.get("theme", {})
+    if not theme or not theme.get("mode"):
+        # Default to light if we have images (most uploaded UI screenshots are light)
+        theme = {"mode": "light", "brand_color": "#3b82f6", "brand_name": "blue"}
+
     return {
         "project_name": project_name,
         "entities": entities,
@@ -297,6 +308,7 @@ async def brownfield_exploration_node(state: PipelineState) -> dict:
         "project_structure": project_structure,
         "tech_stack": tech_stack,
         "prototype_context": prototype_context,
+        "theme": theme,
         "tool_call_count": tool_call_count,
         "total_input_tokens": total_input_tokens,
         "total_output_tokens": total_output_tokens,

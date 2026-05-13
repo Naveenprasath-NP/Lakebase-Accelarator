@@ -114,17 +114,17 @@ def build_pipeline_graph() -> StateGraph:
     Flow:
     Greenfield:
       START → intake → (sufficient?) → analysis_review_checkpoint → design_model
-            → schema → seed_data → [backend_dev + frontend_dev] (PARALLEL) → integration → deployment → END
+            → schema_provisioning → [seed_data + backend_dev + frontend_dev] (PARALLEL) → integration → deployment → END
 
     Brownfield:
       START → brownfield_exploration → analysis_review_checkpoint → design_model
-            → schema → seed_data → [backend_dev + frontend_dev] (PARALLEL) → integration → deployment → END
+            → schema_provisioning → [seed_data + backend_dev + frontend_dev] (PARALLEL) → integration → deployment → END
 
     Single checkpoint shows a summary of what the agent found (entities, relationships,
     tech stack) and asks the user to confirm before proceeding to schema design.
 
-    Parallelization: backend_dev and frontend_dev run concurrently since they both
-    only need data_model + schema_name. This saves 60-120 seconds of pipeline time.
+    Parallelization: seed_data, backend_dev, and frontend_dev all run concurrently
+    since they only need data_model + schema_name. This saves 60-120+ seconds.
 
     Self-healing:
       deployment failure → backend_dev → integration → deployment (retry)
@@ -161,14 +161,15 @@ def build_pipeline_graph() -> StateGraph:
 
     # ─── Shared pipeline (both paths converge at design_model) ───────
     builder.add_edge("design_model", "schema_provisioning")
+
+    # ─── PARALLEL: seed_data, backend_dev, frontend_dev run concurrently ─
+    # All three only need data_model + schema_name (available after schema_provisioning)
     builder.add_edge("schema_provisioning", "seed_data")
+    builder.add_edge("schema_provisioning", "backend_dev")
+    builder.add_edge("schema_provisioning", "frontend_dev")
 
-    # ─── PARALLEL: backend_dev and frontend_dev run concurrently ──────
-    # Both only need data_model + schema_name (available after seed_data)
-    builder.add_edge("seed_data", "backend_dev")
-    builder.add_edge("seed_data", "frontend_dev")
-
-    # Both must complete before integration
+    # All three must complete before integration
+    builder.add_edge("seed_data", "integration")
     builder.add_edge("backend_dev", "integration")
     builder.add_edge("frontend_dev", "integration")
 
