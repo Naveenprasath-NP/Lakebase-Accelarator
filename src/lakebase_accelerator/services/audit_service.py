@@ -21,26 +21,31 @@ class AuditService:
         schema_name: str,
         mode: str,
         prompt: str,
+        uploaded_files: list[dict] | None = None,
     ) -> str:
         """Create a project record at pipeline start.
 
         Returns:
             The generated project UUID.
         """
+        import json as _json
+
         logger.info(
             "Creating project record",
             extra={"step": "audit", "project_name": project_name, "mode": mode},
         )
 
+        files_json = _json.dumps(uploaded_files) if uploaded_files else "[]"
+
         rows = self._repo.execute_query(
             ACCELERATOR_META_SCHEMA,
             """
             INSERT INTO accelerator_meta.projects
-                (project_name, schema_name, mode, prompt, status)
-            VALUES (%s, %s, %s, %s, 'in_progress')
+                (project_name, schema_name, mode, prompt, status, uploaded_files)
+            VALUES (%s, %s, %s, %s, 'in_progress', %s::jsonb)
             RETURNING id::text
             """,
-            (project_name, schema_name, mode, prompt),
+            (project_name, schema_name, mode, prompt, files_json),
         )
 
         project_id = rows[0]["id"] if rows else "unknown"
@@ -176,7 +181,7 @@ class AuditService:
             ACCELERATOR_META_SCHEMA,
             """
             SELECT id::text, project_name, mode, status, prompt, app_name, app_url,
-                   schema_name, generated_tables, chat_history,
+                   schema_name, generated_tables, uploaded_files, chat_history,
                    pipeline_duration_seconds,
                    failure_step, failure_message,
                    created_at, modified_at

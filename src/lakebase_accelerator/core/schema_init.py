@@ -19,6 +19,7 @@ DDL_STATEMENTS = [
         status                  VARCHAR(20) NOT NULL DEFAULT 'pending',
         mode                    VARCHAR(20) NOT NULL DEFAULT 'greenfield',
         prompt                  TEXT NOT NULL,
+        uploaded_files          JSONB NOT NULL DEFAULT '[]'::jsonb,
         generated_tables        JSONB,
         chat_history            JSONB NOT NULL DEFAULT '[]'::jsonb,
         pipeline_duration_seconds FLOAT,

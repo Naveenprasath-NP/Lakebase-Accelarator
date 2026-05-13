@@ -112,6 +112,7 @@ class ProjectDetailData(BaseModel):
     schema_name: str | None = None
     catalog: str | None = None
     tables_created: list[str] = Field(default_factory=list)
+    uploaded_files: list[dict] = Field(default_factory=list)
     chat_history: list[dict] = Field(default_factory=list)
     pipeline_duration_seconds: float | None = None
     steps: list[PipelineStepDetail] = Field(default_factory=list)
