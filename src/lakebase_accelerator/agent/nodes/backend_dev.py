@@ -235,7 +235,7 @@ def _generate_backend(state: PipelineState) -> dict:
 
 def _fix_backend(state: PipelineState, fix_context: str) -> dict:
     """Self-healing: regenerate broken files based on deployment/integration error logs."""
-    llm = get_llm(max_tokens=8192)
+    llm = get_llm(max_tokens=16384)
     backend_files = dict(state.get("backend_files", {}))
     schema_name = state["schema_name"]
     data_model_summary = _summarize_data_model(state["data_model"])
@@ -496,7 +496,7 @@ def _generate_route_with_llm(table: dict, data_model: dict, user_prompt: str, re
 
     Returns: (route_code, extra_requirements_list)
     """
-    llm = get_llm(max_tokens=8192)
+    llm = get_llm(max_tokens=16384)
     entity_name = table["name"]
     entity_plural = entity_name if entity_name.endswith("s") else f"{entity_name}s"
 
@@ -530,10 +530,30 @@ STRICT RULES:
 4. MUST define router as: `router = APIRouter(prefix="/api/{entity_plural}", tags=["{entity_plural}"])`
 5. MUST use Pydantic BaseModel for request/response (Optional for nullable fields)
 6. MUST handle NULL columns with Optional[str] = None in response models
-7. CAN add custom endpoints beyond CRUD if the user's request requires it
-8. CAN add join queries if foreign keys exist and the user needs related data
-9. CANNOT import libraries not in this list: fastapi, pydantic, psycopg2, httpx, uuid, datetime, typing, os, json
-10. If you need an additional library, add a comment at the TOP: # REQUIRES: library_name==version
+7. CANNOT import libraries not in this list: fastapi, pydantic, psycopg2, httpx, uuid, datetime, typing, os, json
+8. If you need an additional library, add a comment at the TOP: # REQUIRES: library_name==version
+
+BUSINESS LOGIC REQUIREMENTS (generate these in addition to basic CRUD):
+9. ADD a GET /api/{entity_plural}/stats endpoint that returns:
+   - total count
+   - if entity has a "status" column: count per status value (e.g., {{"pending": 3, "approved": 5}})
+   - if entity has date columns: count of records created today, this week
+   This powers the frontend Dashboard charts.
+
+10. If this entity has foreign key columns (ending in _id):
+    - In the GET list endpoint, JOIN with the referenced table to include the referenced entity's name/title
+    - Return the joined field as "{{fk_column}}_name" (e.g., employee_id_name = "John Smith")
+    - This allows the frontend to show human-readable names instead of UUIDs
+
+11. If this entity has a "status" field:
+    - ADD a PATCH /api/{entity_plural}/{{id}}/status endpoint that accepts {{"status": "new_value"}}
+    - This powers Approve/Reject/Submit workflow buttons on the frontend
+
+12. ADD query parameter support to the GET list endpoint:
+    - ?status=value (filter by status if column exists)
+    - ?search=text (search across text/varchar columns with ILIKE)
+    - ?limit=N&offset=M (pagination)
+    This powers frontend search, filtering, and pagination.
 
 Return ONLY the complete Python file. No markdown fences."""
 

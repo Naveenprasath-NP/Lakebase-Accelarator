@@ -1,0 +1,52 @@
+import React, { useRef } from 'react'
+
+interface ConfirmDialogProps {
+  title: string
+  message: string
+  confirmLabel?: string
+  cancelLabel?: string
+  variant?: 'danger' | 'primary'
+  onConfirm: () => void
+  onCancel: () => void
+  loading?: boolean
+}
+
+const ConfirmDialog: React.FC<ConfirmDialogProps> = ({
+  title,
+  message,
+  confirmLabel = 'Confirm',
+  cancelLabel = 'Cancel',
+  variant = 'danger',
+  onConfirm,
+  onCancel,
+  loading = false,
+}) => {
+  const overlayRef = useRef<HTMLDivElement>(null)
+
+  const handleOverlayClick = (e: React.MouseEvent) => {
+    if (e.target === overlayRef.current) onCancel()
+  }
+
+  return (
+    <div className="modal-overlay" ref={overlayRef} onClick={handleOverlayClick}>
+      <div className="modal modal-sm">
+        <h2 className="modal-title">{title}</h2>
+        <p className="modal-message">{message}</p>
+        <div className="modal-actions">
+          <button className="btn btn-secondary" onClick={onCancel} disabled={loading}>
+            {cancelLabel}
+          </button>
+          <button
+            className={`btn btn-${variant}`}
+            onClick={onConfirm}
+            disabled={loading}
+          >
+            {loading ? 'Processing...' : confirmLabel}
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+export default ConfirmDialog

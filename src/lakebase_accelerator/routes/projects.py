@@ -202,6 +202,7 @@ async def execute_pipeline(
         "current_step": "",
         "completed_steps": [],
         "error": "",
+        "theme": {"mode": "dark", "brand_color": "#3b82f6", "brand_name": "blue"},
     }
 
     # Launch pipeline in background — runs independently of HTTP connection

@@ -1,0 +1,264 @@
+import React, { useState, useEffect, useCallback, useMemo } from 'react'
+import DataTable, { Column } from '../components/DataTable'
+import ConfirmDialog from '../components/ConfirmDialog'
+import Toast, { ToastMessage } from '../components/Toast'
+import FormModal, { FormField } from '../components/FormModal'
+import SearchFilter from '../components/SearchFilter'
+import StatusBadge from '../components/StatusBadge'
+import DetailPanel, { DetailField } from '../components/DetailPanel'
+import apiClient from '../api/client'
+import { {{ entity.type_name }}, {{ entity.type_name }}Create, {{ entity.type_name }}Update } from '../types'
+
+const ENTITY_PLURAL = '{{ entity.plural }}'
+
+const columns: Column[] = [
+{% for col in entity.columns %}
+{% if 'status' in col.name or 'state' in col.name or 'priority' in col.name %}
+  { key: '{{ col.name }}', label: '{{ col.label }}', render: (value: any) => value ? <StatusBadge status={value} /> : <span className="text-muted">—</span> },
+{% else %}
+  { key: '{{ col.name }}', label: '{{ col.label }}' },
+{% endif %}
+{% endfor %}
+]
+
+const formFields: FormField[] = [
+{% for col in entity.columns %}
+  {
+    key: '{{ col.name }}',
+    label: '{{ col.label }}',
+    type: '{{ col.form_type }}',
+    required: {{ 'true' if not col.nullable else 'false' }},
+    placeholder: '{{ col.placeholder }}',
+  },
+{% endfor %}
+]
+
+const {{ entity.type_name }}List: React.FC = () => {
+  const [data, setData] = useState<{{ entity.type_name }}[]>([])
+  const [filteredData, setFilteredData] = useState<{{ entity.type_name }}[]>([])
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+  const [showForm, setShowForm] = useState(false)
+  const [editingItem, setEditingItem] = useState<{{ entity.type_name }} | null>(null)
+  const [viewingItem, setViewingItem] = useState<{{ entity.type_name }} | null>(null)
+  const [formValues, setFormValues] = useState<Record<string, any>>({})
+  const [formLoading, setFormLoading] = useState(false)
+  const [formError, setFormError] = useState<string | null>(null)
+  const [deleteTarget, setDeleteTarget] = useState<{{ entity.type_name }} | null>(null)
+  const [deleteLoading, setDeleteLoading] = useState(false)
+  const [toasts, setToasts] = useState<ToastMessage[]>([])
+  const [searchQuery, setSearchQuery] = useState('')
+
+  const addToast = (type: ToastMessage['type'], message: string) => {
+    const id = Date.now().toString()
+    setToasts((prev) => [...prev, { id, type, message }])
+  }
+
+  const dismissToast = useCallback((id: string) => {
+    setToasts((prev) => prev.filter((t) => t.id !== id))
+  }, [])
+
+  const fetchData = useCallback(async () => {
+    try {
+      setLoading(true)
+      setError(null)
+      const result = await apiClient.getAll<{{ entity.type_name }}>(ENTITY_PLURAL)
+      setData(result)
+      setFilteredData(result)
+    } catch (err: any) {
+      setError(err.message || 'Failed to load data')
+    } finally {
+      setLoading(false)
+    }
+  }, [])
+
+  useEffect(() => {
+    fetchData()
+  }, [fetchData])
+
+  // Client-side search
+  useEffect(() => {
+    if (!searchQuery.trim()) {
+      setFilteredData(data)
+      return
+    }
+    const query = searchQuery.toLowerCase()
+    setFilteredData(
+      data.filter((item) =>
+        Object.values(item).some(
+          (val) => val && String(val).toLowerCase().includes(query)
+        )
+      )
+    )
+  }, [searchQuery, data])
+
+  const handleCreate = () => {
+    setEditingItem(null)
+    setFormValues({})
+    setFormError(null)
+    setShowForm(true)
+  }
+
+  const handleEdit = (row: {{ entity.type_name }}) => {
+    setEditingItem(row)
+    const values: Record<string, any> = {}
+    formFields.forEach((f) => {
+      values[f.key] = row[f.key as keyof {{ entity.type_name }}] ?? ''
+    })
+    setFormValues(values)
+    setFormError(null)
+    setShowForm(true)
+  }
+
+  const handleView = (row: {{ entity.type_name }}) => {
+    setViewingItem(row)
+  }
+
+  const handleFormChange = (key: string, value: any) => {
+    setFormValues((prev) => ({ ...prev, [key]: value }))
+  }
+
+  const handleFormSubmit = async () => {
+    try {
+      setFormLoading(true)
+      setFormError(null)
+
+      if (editingItem) {
+        await apiClient.update<{{ entity.type_name }}>(ENTITY_PLURAL, editingItem.id, formValues)
+        addToast('success', '{{ entity.display_name }} updated successfully')
+      } else {
+        await apiClient.create<{{ entity.type_name }}>(ENTITY_PLURAL, formValues)
+        addToast('success', '{{ entity.display_name }} created successfully')
+      }
+
+      setShowForm(false)
+      setViewingItem(null)
+      fetchData()
+    } catch (err: any) {
+      setFormError(err.message || 'Failed to save')
+    } finally {
+      setFormLoading(false)
+    }
+  }
+
+  const handleDeleteConfirm = async () => {
+    if (!deleteTarget) return
+    try {
+      setDeleteLoading(true)
+      await apiClient.delete(ENTITY_PLURAL, deleteTarget.id)
+      addToast('success', '{{ entity.display_name }} deleted successfully')
+      setDeleteTarget(null)
+      setViewingItem(null)
+      fetchData()
+    } catch (err: any) {
+      addToast('error', err.message || 'Failed to delete')
+      setDeleteTarget(null)
+    } finally {
+      setDeleteLoading(false)
+    }
+  }
+
+  // Detail view
+  if (viewingItem) {
+    const detailFields: DetailField[] = [
+{% for col in entity.columns %}
+{% if 'status' in col.name or 'state' in col.name or 'priority' in col.name %}
+      { label: '{{ col.label }}', value: viewingItem.{{ col.name }} ? <StatusBadge status={viewingItem.{{ col.name }} as string} /> : null },
+{% else %}
+      { label: '{{ col.label }}', value: viewingItem.{{ col.name }}{% if col.form_type == 'textarea' %}, span: 2{% endif %} },
+{% endif %}
+{% endfor %}
+      { label: 'Created', value: viewingItem.created_at ? new Date(viewingItem.created_at).toLocaleString() : null },
+      { label: 'Updated', value: viewingItem.updated_at ? new Date(viewingItem.updated_at).toLocaleString() : null },
+    ]
+
+    return (
+      <>
+        <DetailPanel
+          title={`{{ entity.display_name }} Details`}
+          fields={detailFields}
+          onBack={() => setViewingItem(null)}
+          onEdit={() => handleEdit(viewingItem)}
+          onDelete={() => setDeleteTarget(viewingItem)}
+        />
+
+        {deleteTarget && (
+          <ConfirmDialog
+            title="Delete {{ entity.display_name }}"
+            message="Are you sure you want to delete this {{ entity.display_name | lower }}? This action cannot be undone."
+            confirmLabel="Delete"
+            variant="danger"
+            onConfirm={handleDeleteConfirm}
+            onCancel={() => setDeleteTarget(null)}
+            loading={deleteLoading}
+          />
+        )}
+
+        <Toast toasts={toasts} onDismiss={dismissToast} />
+      </>
+    )
+  }
+
+  return (
+    <>
+      <div className="page-header">
+        <h1 className="page-title">{{ entity.display_name_plural }}</h1>
+        <button className="btn btn-primary" onClick={handleCreate}>
+          + New {{ entity.display_name }}
+        </button>
+      </div>
+
+      <SearchFilter
+        searchPlaceholder="Search {{ entity.display_name_plural | lower }}..."
+        onSearch={setSearchQuery}
+      />
+
+      {error && (
+        <div className="alert alert-error">
+          <span>{error}</span>
+          <button className="btn btn-secondary btn-sm" onClick={fetchData}>
+            Retry
+          </button>
+        </div>
+      )}
+
+      <DataTable
+        columns={columns}
+        data={filteredData}
+        loading={loading}
+        onEdit={handleEdit}
+        onDelete={(row) => setDeleteTarget(row)}
+        emptyMessage={searchQuery ? 'No results match your search' : 'No {{ entity.display_name_plural | lower }} found'}
+      />
+
+      {showForm && (
+        <FormModal
+          title={editingItem ? 'Edit {{ entity.display_name }}' : 'New {{ entity.display_name }}'}
+          fields={formFields}
+          values={formValues}
+          onChange={handleFormChange}
+          onSubmit={handleFormSubmit}
+          onClose={() => setShowForm(false)}
+          loading={formLoading}
+          error={formError}
+        />
+      )}
+
+      {deleteTarget && (
+        <ConfirmDialog
+          title="Delete {{ entity.display_name }}"
+          message="Are you sure you want to delete this {{ entity.display_name | lower }}? This action cannot be undone."
+          confirmLabel="Delete"
+          variant="danger"
+          onConfirm={handleDeleteConfirm}
+          onCancel={() => setDeleteTarget(null)}
+          loading={deleteLoading}
+        />
+      )}
+
+      <Toast toasts={toasts} onDismiss={dismissToast} />
+    </>
+  )
+}
+
+export default {{ entity.type_name }}List

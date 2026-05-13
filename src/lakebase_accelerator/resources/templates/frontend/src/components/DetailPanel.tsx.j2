@@ -1,0 +1,67 @@
+import React from 'react'
+
+export interface DetailField {
+  label: string
+  value: React.ReactNode
+  span?: 1 | 2
+}
+
+interface DetailPanelProps {
+  title: string
+  fields: DetailField[]
+  onEdit?: () => void
+  onDelete?: () => void
+  onBack?: () => void
+}
+
+const DetailPanel: React.FC<DetailPanelProps> = ({
+  title,
+  fields,
+  onEdit,
+  onDelete,
+  onBack,
+}) => {
+  return (
+    <div className="detail-panel">
+      <div className="detail-header">
+        <div className="detail-header-left">
+          {onBack && (
+            <button className="btn btn-ghost btn-sm" onClick={onBack}>
+              ← Back
+            </button>
+          )}
+          <h2 className="detail-title">{title}</h2>
+        </div>
+        <div className="detail-header-actions">
+          {onEdit && (
+            <button className="btn btn-secondary" onClick={onEdit}>
+              Edit
+            </button>
+          )}
+          {onDelete && (
+            <button className="btn btn-danger" onClick={onDelete}>
+              Delete
+            </button>
+          )}
+        </div>
+      </div>
+      <div className="card">
+        <div className="detail-grid">
+          {fields.map((field, idx) => (
+            <div
+              key={idx}
+              className={`detail-field${field.span === 2 ? ' detail-field-full' : ''}`}
+            >
+              <div className="detail-field-label">{field.label}</div>
+              <div className="detail-field-value">
+                {field.value ?? <span className="text-muted">—</span>}
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+export default DetailPanel

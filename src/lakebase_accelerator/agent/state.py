@@ -83,3 +83,6 @@ class PipelineState(TypedDict):
     current_step: str
     completed_steps: list[str]
     error: str
+
+    # ─── Theme ───────────────────────────────────────────────────────
+    theme: dict  # {"mode": "dark"|"light", "brand_color": "#hex", "brand_name": "color_name"}

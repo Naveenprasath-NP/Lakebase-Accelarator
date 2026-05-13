@@ -1,0 +1,114 @@
+/**
+ * API Client — typed fetch wrapper for all entity CRUD + business operations.
+ * Auto-generated from data model. Do not edit manually.
+ */
+
+const API_BASE = '/api'
+
+export interface StatsResponse {
+  total: number
+  by_status?: Record<string, number>
+  today_count?: number
+  week_count?: number
+}
+
+export interface PaginatedParams {
+  search?: string
+  status?: string
+  limit?: number
+  offset?: number
+}
+
+class ApiClient {
+  private async request<T>(
+    path: string,
+    options: RequestInit = {}
+  ): Promise<T> {
+    const url = `${API_BASE}${path}`
+    const config: RequestInit = {
+      headers: {
+        'Content-Type': 'application/json',
+        ...((options.headers as Record<string, string>) || {}),
+      },
+      ...options,
+    }
+
+    const response = await fetch(url, config)
+
+    if (!response.ok) {
+      let errorMessage = `Request failed with status ${response.status}`
+      try {
+        const errorData = await response.json()
+        errorMessage = errorData.detail || errorData.message || errorMessage
+      } catch {
+        // Use default error message
+      }
+      throw new Error(errorMessage)
+    }
+
+    if (response.status === 204) {
+      return undefined as unknown as T
+    }
+
+    return response.json()
+  }
+
+  // ─── List with optional search/filter/pagination ───────────────────
+  async getAll<T>(entityPlural: string, params?: PaginatedParams): Promise<T[]> {
+    let path = `/${entityPlural}`
+    if (params) {
+      const query = new URLSearchParams()
+      if (params.search) query.set('search', params.search)
+      if (params.status) query.set('status', params.status)
+      if (params.limit) query.set('limit', String(params.limit))
+      if (params.offset) query.set('offset', String(params.offset))
+      const qs = query.toString()
+      if (qs) path += `?${qs}`
+    }
+    return this.request<T[]>(path)
+  }
+
+  // ─── Get single record ─────────────────────────────────────────────
+  async getById<T>(entityPlural: string, id: string): Promise<T> {
+    return this.request<T>(`/${entityPlural}/${id}`)
+  }
+
+  // ─── Create ────────────────────────────────────────────────────────
+  async create<T>(entityPlural: string, data: Partial<T>): Promise<T> {
+    return this.request<T>(`/${entityPlural}`, {
+      method: 'POST',
+      body: JSON.stringify(data),
+    })
+  }
+
+  // ─── Update (partial) ──────────────────────────────────────────────
+  async update<T>(entityPlural: string, id: string, data: Partial<T>): Promise<T> {
+    return this.request<T>(`/${entityPlural}/${id}`, {
+      method: 'PUT',
+      body: JSON.stringify(data),
+    })
+  }
+
+  // ─── Delete ────────────────────────────────────────────────────────
+  async delete(entityPlural: string, id: string): Promise<void> {
+    return this.request<void>(`/${entityPlural}/${id}`, {
+      method: 'DELETE',
+    })
+  }
+
+  // ─── Stats (for Dashboard KPIs and charts) ─────────────────────────
+  async getStats(entityPlural: string): Promise<StatsResponse> {
+    return this.request<StatsResponse>(`/${entityPlural}/stats`)
+  }
+
+  // ─── Update status (workflow actions: Approve, Reject, etc.) ───────
+  async updateStatus<T>(entityPlural: string, id: string, status: string): Promise<T> {
+    return this.request<T>(`/${entityPlural}/${id}/status`, {
+      method: 'PATCH',
+      body: JSON.stringify({ status }),
+    })
+  }
+}
+
+export const apiClient = new ApiClient()
+export default apiClient

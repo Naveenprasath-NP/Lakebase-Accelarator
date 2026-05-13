@@ -1,0 +1,127 @@
+import React, { useEffect, useRef } from 'react'
+
+export interface FormField {
+  key: string
+  label: string
+  type: 'text' | 'number' | 'textarea' | 'select' | 'checkbox' | 'date'
+  required?: boolean
+  placeholder?: string
+  options?: { value: string; label: string }[]
+}
+
+interface FormModalProps {
+  title: string
+  fields: FormField[]
+  values: Record<string, any>
+  onChange: (key: string, value: any) => void
+  onSubmit: () => void
+  onClose: () => void
+  loading?: boolean
+  error?: string | null
+}
+
+const FormModal: React.FC<FormModalProps> = ({
+  title,
+  fields,
+  values,
+  onChange,
+  onSubmit,
+  onClose,
+  loading = false,
+  error = null,
+}) => {
+  const overlayRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    const handleEsc = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose()
+    }
+    document.addEventListener('keydown', handleEsc)
+    return () => document.removeEventListener('keydown', handleEsc)
+  }, [onClose])
+
+  const handleOverlayClick = (e: React.MouseEvent) => {
+    if (e.target === overlayRef.current) onClose()
+  }
+
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault()
+    onSubmit()
+  }
+
+  return (
+    <div className="modal-overlay" ref={overlayRef} onClick={handleOverlayClick}>
+      <div className="modal">
+        <h2 className="modal-title">{title}</h2>
+        {error && <div className="form-error">{error}</div>}
+        <form onSubmit={handleSubmit}>
+          {fields.map((field) => (
+            <div className="form-group" key={field.key}>
+              <label className="form-label">
+                {field.label}
+                {field.required && <span className="required-mark">*</span>}
+              </label>
+              {field.type === 'textarea' ? (
+                <textarea
+                  className="form-textarea"
+                  value={values[field.key] || ''}
+                  onChange={(e) => onChange(field.key, e.target.value)}
+                  placeholder={field.placeholder || `Enter ${field.label.toLowerCase()}`}
+                  required={field.required}
+                />
+              ) : field.type === 'select' ? (
+                <select
+                  className="form-select"
+                  value={values[field.key] || ''}
+                  onChange={(e) => onChange(field.key, e.target.value)}
+                  required={field.required}
+                >
+                  <option value="">Select {field.label.toLowerCase()}</option>
+                  {field.options?.map((opt) => (
+                    <option key={opt.value} value={opt.value}>
+                      {opt.label}
+                    </option>
+                  ))}
+                </select>
+              ) : field.type === 'checkbox' ? (
+                <label className="checkbox-label">
+                  <input
+                    type="checkbox"
+                    className="form-checkbox"
+                    checked={!!values[field.key]}
+                    onChange={(e) => onChange(field.key, e.target.checked)}
+                  />
+                  <span>{field.placeholder || field.label}</span>
+                </label>
+              ) : (
+                <input
+                  className="form-input"
+                  type={field.type}
+                  value={values[field.key] || ''}
+                  onChange={(e) =>
+                    onChange(
+                      field.key,
+                      field.type === 'number' ? Number(e.target.value) : e.target.value
+                    )
+                  }
+                  placeholder={field.placeholder || `Enter ${field.label.toLowerCase()}`}
+                  required={field.required}
+                />
+              )}
+            </div>
+          ))}
+          <div className="modal-actions">
+            <button type="button" className="btn btn-secondary" onClick={onClose}>
+              Cancel
+            </button>
+            <button type="submit" className="btn btn-primary" disabled={loading}>
+              {loading ? 'Saving...' : 'Save'}
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  )
+}
+
+export default FormModal

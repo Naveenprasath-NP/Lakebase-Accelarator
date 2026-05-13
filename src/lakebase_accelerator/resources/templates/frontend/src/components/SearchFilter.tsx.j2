@@ -1,0 +1,90 @@
+import React, { useState, useCallback } from 'react'
+
+export interface FilterOption {
+  key: string
+  label: string
+  type: 'text' | 'select'
+  options?: { value: string; label: string }[]
+  placeholder?: string
+}
+
+interface SearchFilterProps {
+  searchPlaceholder?: string
+  filters?: FilterOption[]
+  onSearch: (query: string) => void
+  onFilter?: (filters: Record<string, string>) => void
+}
+
+const SearchFilter: React.FC<SearchFilterProps> = ({
+  searchPlaceholder = 'Search...',
+  filters = [],
+  onSearch,
+  onFilter,
+}) => {
+  const [searchQuery, setSearchQuery] = useState('')
+  const [filterValues, setFilterValues] = useState<Record<string, string>>({})
+
+  const handleSearchChange = useCallback(
+    (e: React.ChangeEvent<HTMLInputElement>) => {
+      const value = e.target.value
+      setSearchQuery(value)
+      onSearch(value)
+    },
+    [onSearch]
+  )
+
+  const handleFilterChange = useCallback(
+    (key: string, value: string) => {
+      const updated = { ...filterValues, [key]: value }
+      setFilterValues(updated)
+      onFilter?.(updated)
+    },
+    [filterValues, onFilter]
+  )
+
+  return (
+    <div className="search-filter-bar">
+      <div className="search-input-wrapper">
+        <svg className="search-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+          <circle cx="11" cy="11" r="8" />
+          <path d="m21 21-4.35-4.35" />
+        </svg>
+        <input
+          type="text"
+          className="search-input"
+          placeholder={searchPlaceholder}
+          value={searchQuery}
+          onChange={handleSearchChange}
+        />
+      </div>
+      {filters.map((filter) => (
+        <div key={filter.key} className="filter-item">
+          {filter.type === 'select' ? (
+            <select
+              className="filter-select"
+              value={filterValues[filter.key] || ''}
+              onChange={(e) => handleFilterChange(filter.key, e.target.value)}
+            >
+              <option value="">{filter.placeholder || `All ${filter.label}`}</option>
+              {filter.options?.map((opt) => (
+                <option key={opt.value} value={opt.value}>
+                  {opt.label}
+                </option>
+              ))}
+            </select>
+          ) : (
+            <input
+              type="text"
+              className="filter-input"
+              placeholder={filter.placeholder || filter.label}
+              value={filterValues[filter.key] || ''}
+              onChange={(e) => handleFilterChange(filter.key, e.target.value)}
+            />
+          )}
+        </div>
+      ))}
+    </div>
+  )
+}
+
+export default SearchFilter

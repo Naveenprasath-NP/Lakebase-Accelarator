@@ -1,7 +1,7 @@
 command:
   - bash
   - -c
-  - "uv sync --all-extras && uv run uvicorn lakebase_accelerator.main:app --host 0.0.0.0 --port 8000"
+  - "uv sync --all-extras && uv run uvicorn lakebase_accelerator.main:app --host 0.0.0.0 --port 8000 --timeout-keep-alive 300"
 
 env:
   - name: PYTHONPATH

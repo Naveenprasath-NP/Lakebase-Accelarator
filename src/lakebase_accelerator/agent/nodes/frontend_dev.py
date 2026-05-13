@@ -1,18 +1,23 @@
 """Frontend Dev Agent — Node 6.
 
-Generates React frontend files via LLM, then builds them using a
-Databricks Job on a cluster with Node.js (since the accelerator app
-environment does not have Node.js installed).
+Generates a modern React frontend using a HYBRID approach:
+- Templates: scaffolding (package.json, vite, tsconfig, CSS, router, API client,
+  reusable components like DataTable, FormModal, Toast, etc.)
+- LLM: page-level business logic (Dashboard KPIs, entity pages with workflow
+  actions, relationship-aware views, custom buttons like Approve/Reject)
+
+The LLM is CONSTRAINED to only use pre-built components — no random imports.
+This gives us: zero import errors + real business application logic.
 
 The built output (dist/) becomes the static/ folder for the backend.
-
-For brownfield: uses prototype_context to replicate the original UI faithfully.
-For greenfield: generates a generic CRUD interface.
-Falls back to static HTML if the React build job fails.
+Falls back to static HTML if the Databricks Job build fails.
 """
 
 import json
+import re
+from pathlib import Path
 
+from jinja2 import Environment, FileSystemLoader
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from lakebase_accelerator.agent.llm import get_llm
@@ -20,149 +25,96 @@ from lakebase_accelerator.agent.state import PipelineState
 from lakebase_accelerator.utils.logger import logger
 from lakebase_accelerator.utils.prompt_loader import get_system_prompt
 
-
-def _get_frontend_plan_prompt() -> str:
-    """Load the frontend plan prompt from DB/YAML."""
-    try:
-        return get_system_prompt("frontend_plan")
-    except KeyError:
-        return FRONTEND_PLAN_PROMPT_FALLBACK
+# Template directory
+TEMPLATE_DIR = Path(__file__).parent.parent.parent / "resources" / "templates" / "frontend"
 
 
-def _get_frontend_file_prompt() -> str:
-    """Load the frontend file generation prompt from DB/YAML."""
-    try:
-        return get_system_prompt("frontend_file_generation")
-    except KeyError:
-        return FRONTEND_FILE_PROMPT_FALLBACK
-
-
-def _get_frontend_static_prompt() -> str:
-    """Load the frontend static fallback prompt from DB/YAML."""
-    try:
-        return get_system_prompt("frontend_static_fallback")
-    except KeyError:
-        return FRONTEND_STATIC_FALLBACK_PROMPT
-
-
-def _get_frontend_brownfield_prompt() -> str:
-    """Load the brownfield frontend prompt from DB/YAML."""
-    try:
-        return get_system_prompt("frontend_brownfield")
-    except KeyError:
-        return FRONTEND_BROWNFIELD_PROMPT_FALLBACK
-
-FRONTEND_PLAN_PROMPT_FALLBACK = """Plan a minimal React frontend for a CRUD app with DARK THEME. Return ONLY a JSON array of file paths:
-["package.json", "vite.config.ts", "tsconfig.json", "tsconfig.node.json", "index.html", "src/main.tsx", "src/App.tsx", "src/api/client.ts", "src/index.css"]
-
-Keep it minimal — one App.tsx with all CRUD UI inline. No separate page files.
-IMPORTANT: Always include tsconfig.node.json (required by vite.config.ts).
-"""
-
-FRONTEND_FILE_PROMPT_FALLBACK = """Generate COMPLETE content for: {file_path}
-
-Entities: {entities_summary}
-API base: /api (same origin, relative)
-
-DESIGN SYSTEM (MUST follow — DARK THEME):
-- Background: #0f172a (dark navy)
-- Surface/cards: #1e293b (slate-800)
-- Surface hover: #334155 (slate-700)
-- Primary button: #3b82f6 (blue-500), hover: #2563eb
-- Danger button: #ef4444, Success: #22c55e
-- Text primary: #f1f5f9 (slate-100)
-- Text secondary: #94a3b8 (slate-400)
-- Text muted: #64748b (slate-500)
-- Borders: #334155 (slate-700)
-- Input background: #0f172a with border #334155
-- Focus ring: box-shadow: 0 0 0 3px rgba(59,130,246,0.15)
-- Layout: sidebar navigation (240px, bg #1e293b) + main content area
-- Tables: full-width, uppercase headers, hover row highlight with #334155
-- Buttons: rounded-lg, font-weight 600, hover translateY(-1px) + shadow
-- Font: system-ui, -apple-system, sans-serif
-
-Rules:
-- React 18 + TypeScript + Vite
-- DO NOT use Tailwind — use plain CSS with CSS custom properties (variables)
-- src/index.css: define :root with all design tokens above, global styles
-- App.tsx: sidebar + main content layout, CRUD UI with dark theme
-- API calls use fetch() to /api/{entity_plural}
-- Keep it simple — everything in App.tsx for small apps
-- package.json must include: react, react-dom, typescript, vite, @vitejs/plugin-react
-- vite.config.ts: use default build output (dist/), no custom outDir
-- vite.config.ts: do NOT reference tsconfig.node.json unless you also generate it
-- tsconfig.json: set "references": [{{"path": "./tsconfig.node.json"}}] only if tsconfig.node.json exists
-- tsconfig.node.json: must include {{"compilerOptions": {{"composite": true, "module": "ESNext", "moduleResolution": "bundler"}}, "include": ["vite.config.ts"]}}
-- index.html: must be at project root (not in src/), must have <div id="root"></div> and <script type="module" src="/src/main.tsx"></script>
-- File MUST be complete — no truncation
-- Return ONLY the code, no markdown
-
-IMPORTANT for package.json:
-- Include a "build" script: "vite build"
-- Include exact versions for all dependencies (no ^ or ~ prefixes)
-- Do NOT generate package-lock.json — npm install will create it automatically
-"""
+# ═══════════════════════════════════════════════════════════════════════
+# MAIN NODE
+# ═══════════════════════════════════════════════════════════════════════
 
 
 def frontend_dev_node(state: PipelineState) -> dict:
-    """Generate React frontend and build it via a Databricks Job.
-
-    For brownfield: uses prototype_context to replicate the original UI.
-    For greenfield: generates a generic CRUD interface.
+    """Generate React frontend — hybrid template + LLM approach.
 
     Flow:
-    1. Generate React source files using LLM (brownfield-aware)
-    2. Submit a Databricks Job to run npm ci + npm run build on a cluster
-    3. Retrieve the built dist/ output
-    4. Return as static/ files for the bundle
+    1. Build entity context from data model
+    2. Render scaffolding from templates (config, CSS, components, API client, types)
+    3. LLM generates business-logic pages (Dashboard, per-entity pages with
+       workflow actions, relationship views, custom KPIs)
+    4. Submit to Databricks Job for npm build
+    5. Fallback to static HTML if build fails
 
-    Falls back to static HTML if the build job fails.
+    The LLM is constrained: it can ONLY import from pre-built components.
+    This eliminates import errors while allowing real business logic.
     """
     import asyncio
 
     logger.info("Node: frontend_dev — generating React frontend", extra={"step": "frontend_dev"})
 
     data_model = state["data_model"]
-    backend_files = state.get("backend_files", {})
+    backend_files = state.get("backend_files", {})  # May be empty if running parallel with backend_dev
     app_name = state.get("app_name", "generated-app")
-    entities_summary = _summarize_entities(data_model)
     pipeline_type = state.get("pipeline_type", "greenfield")
     prototype_context = state.get("prototype_context", "")
-
-    # ─── Template-based React generation ──────────────────────────────
-    # 1. Render fixed template files (package.json, vite.config, tsconfig, etc.)
-    # 2. Single LLM call to generate ONLY App.tsx (with full context)
-    # 3. Submit to Databricks Job for build
-    # 4. Fallback to static HTML if build fails
-    logger.info("Generating React frontend (template + LLM for App.tsx)...", extra={"step": "frontend_dev"})
-
     project_name = state.get("project_name", "generated-app")
     project_title = project_name.replace("-", " ").title()
+    user_prompt = state.get("prompt", "")
+
+    # ─── Step 1: Build entity context from data model ─────────────────
+    entities = _build_entity_context(data_model)
     api_contract = _extract_api_contract(backend_files, data_model)
+    theme = state.get("theme", {"mode": "dark", "brand_color": "#3b82f6", "brand_name": "blue"})
 
-    # Step 1: Render template files
-    source_files = _render_frontend_templates(project_name, project_title)
+    # ─── Step 2: Render scaffolding from templates ────────────────────
+    logger.info(
+        f"Rendering frontend scaffolding ({len(entities)} entities, theme={theme.get('mode', 'dark')})...",
+        extra={"step": "frontend_dev"},
+    )
 
-    # Step 2: Generate App.tsx via LLM (single call with full context)
+    source_files = _render_scaffolding(
+        project_name=project_name,
+        project_title=project_title,
+        entities=entities,
+        theme=theme,
+    )
+
+    # ─── Step 3: LLM generates business-logic pages ───────────────────
+    logger.info("Generating business-logic pages via LLM...", extra={"step": "frontend_dev"})
+
     try:
-        app_tsx = _generate_app_tsx(entities_summary, api_contract, data_model, pipeline_type, prototype_context)
-        source_files["src/App.tsx"] = app_tsx
+        page_files = _generate_business_pages(
+            entities=entities,
+            data_model=data_model,
+            api_contract=api_contract,
+            user_prompt=user_prompt,
+            project_title=project_title,
+            pipeline_type=pipeline_type,
+            prototype_context=prototype_context,
+        )
+        source_files.update(page_files)
     except Exception as e:
-        logger.warning(f"App.tsx generation failed: {e}, using static fallback", extra={"step": "frontend_dev"})
-        frontend_files = _generate_static_fallback(entities_summary, data_model, api_contract)
-        return {
-            "frontend_files": frontend_files,
-            "current_step": "frontend_dev",
-            "completed_steps": state.get("completed_steps", []) + ["frontend_dev"],
-        }
+        logger.warning(
+            f"LLM page generation failed ({e}), using template fallback pages",
+            extra={"step": "frontend_dev"},
+        )
+        # Fallback: use template-generated pages (basic CRUD)
+        fallback_pages = _render_fallback_pages(
+            project_name=project_name,
+            project_title=project_title,
+            entities=entities,
+        )
+        source_files.update(fallback_pages)
 
-    # Step 3: Build via Databricks Job
-    logger.info(f"Building React frontend ({len(source_files)} files)...", extra={"step": "frontend_dev"})
+    logger.info(
+        f"Frontend source ready: {len(source_files)} files",
+        extra={"step": "frontend_dev"},
+    )
 
+    # ─── Step 4: Build via Databricks Job ─────────────────────────────
     try:
         from lakebase_accelerator.agent.tools import _get_workspace_client
         from lakebase_accelerator.services.frontend_build_service import FrontendBuildService
-        import asyncio
         import concurrent.futures
 
         workspace_client = _get_workspace_client()
@@ -174,64 +126,6 @@ def frontend_dev_node(state: PipelineState) -> dict:
             loop = None
 
         if loop and loop.is_running():
-            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-                future = pool.submit(asyncio.run, build_service.build_frontend(app_name, source_files))
-                static_files = future.result(timeout=360)
-        else:
-            static_files = asyncio.run(build_service.build_frontend(app_name, source_files))
-
-        logger.info(f"React build complete: {len(static_files)} static files", extra={"step": "frontend_dev"})
-
-        return {
-            "frontend_files": static_files,
-            "current_step": "frontend_dev",
-            "completed_steps": state.get("completed_steps", []) + ["frontend_dev"],
-        }
-
-    except Exception as e:
-        logger.warning(f"React build failed ({e}), falling back to static HTML", extra={"step": "frontend_dev"})
-        frontend_files = _generate_static_fallback(entities_summary, data_model, api_contract)
-        return {
-            "frontend_files": frontend_files,
-            "current_step": "frontend_dev",
-            "completed_steps": state.get("completed_steps", []) + ["frontend_dev"],
-        }
-        logger.warning("LLM failed to generate frontend files, using static fallback")
-        api_contract = _extract_api_contract(backend_files, data_model)
-        if pipeline_type == "brownfield" and prototype_context:
-            frontend_files = _generate_brownfield_frontend(entities_summary, data_model, api_contract, prototype_context)
-        else:
-            frontend_files = _generate_static_fallback(entities_summary, data_model, api_contract)
-        return {
-            "frontend_files": frontend_files,
-            "current_step": "frontend_dev",
-            "completed_steps": state.get("completed_steps", []) + ["frontend_dev"],
-        }
-
-    # Step 2: Build via Databricks Job
-    logger.info(
-        f"Building React frontend via Databricks Job ({len(source_files)} source files)...",
-        extra={"step": "frontend_dev"},
-    )
-
-    try:
-        # Get workspace client from the tools module (same pattern as deployment node)
-        from lakebase_accelerator.agent.tools import _get_workspace_client
-        from lakebase_accelerator.services.frontend_build_service import FrontendBuildService
-
-        workspace_client = _get_workspace_client()
-        build_service = FrontendBuildService(workspace_client)
-
-        # Run the async build — handle both sync and async calling contexts
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            loop = None
-
-        if loop and loop.is_running():
-            # We're inside an async context (LangGraph runs nodes in async)
-            import concurrent.futures
-
             with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
                 future = pool.submit(
                     asyncio.run, build_service.build_frontend(app_name, source_files)
@@ -257,12 +151,13 @@ def frontend_dev_node(state: PipelineState) -> dict:
             extra={"step": "frontend_dev"},
         )
 
-        # Fallback: generate static HTML (works without Node.js)
-        api_contract = _extract_api_contract(backend_files, data_model)
+        # ─── Step 4: Fallback — generate static HTML ─────────────────
         if pipeline_type == "brownfield" and prototype_context:
-            frontend_files = _generate_brownfield_frontend(entities_summary, data_model, api_contract, prototype_context)
+            frontend_files = _generate_brownfield_static_fallback(
+                entities, data_model, api_contract, prototype_context
+            )
         else:
-            frontend_files = _generate_static_fallback(entities_summary, data_model, api_contract)
+            frontend_files = _generate_static_fallback(entities, data_model, api_contract)
 
         return {
             "frontend_files": frontend_files,
@@ -271,284 +166,531 @@ def frontend_dev_node(state: PipelineState) -> dict:
         }
 
 
-def _render_frontend_templates(project_name: str, project_title: str) -> dict[str, str]:
-    """Render fixed frontend template files using Jinja2.
+# ═══════════════════════════════════════════════════════════════════════
+# ENTITY CONTEXT BUILDER
+# ═══════════════════════════════════════════════════════════════════════
 
-    These files never change — they're the scaffolding that App.tsx plugs into.
+
+def _build_entity_context(data_model: dict) -> list[dict]:
+    """Build rich entity context for templates from the data model.
+
+    Each entity dict contains everything templates need:
+    - name, plural, type_name, display_name, display_name_plural
+    - columns with: name, label, ts_type, form_type, nullable, placeholder, optional
     """
-    from pathlib import Path
-    from jinja2 import Environment, FileSystemLoader
+    tables = data_model.get("tables", [])
+    entities = []
 
-    template_dir = Path(__file__).parent.parent.parent / "resources" / "templates" / "frontend"
-    env = Environment(loader=FileSystemLoader(str(template_dir)))
+    for table in tables:
+        entity_name = table["name"]
+        # Determine plural form
+        if entity_name.endswith("s"):
+            entity_plural = entity_name
+        elif entity_name.endswith("y") and entity_name[-2] not in "aeiou":
+            entity_plural = entity_name[:-1] + "ies"
+        else:
+            entity_plural = entity_name + "s"
 
-    context = {"project_name": project_name, "project_title": project_title}
+        # Type name: PascalCase
+        type_name = "".join(word.capitalize() for word in entity_name.split("_"))
+
+        # Display names
+        display_name = entity_name.replace("_", " ").title()
+        display_name_plural = entity_plural.replace("_", " ").title()
+
+        # Build columns (exclude system fields)
+        columns = []
+        for col in table.get("columns", []):
+            if col["name"] in ("id", "created_at", "updated_at"):
+                continue
+
+            pg_type = col.get("data_type", "TEXT").upper()
+            ts_type = _pg_to_ts_type(pg_type)
+            form_type = _pg_to_form_type(pg_type)
+            nullable = col.get("nullable", True)
+            label = col["name"].replace("_", " ").title()
+            placeholder = f"Enter {label.lower()}"
+
+            columns.append({
+                "name": col["name"],
+                "label": label,
+                "ts_type": ts_type,
+                "form_type": form_type,
+                "nullable": nullable,
+                "optional": nullable,
+                "placeholder": placeholder,
+            })
+
+        entities.append({
+            "name": entity_name,
+            "plural": entity_plural,
+            "type_name": type_name,
+            "display_name": display_name,
+            "display_name_plural": display_name_plural,
+            "columns": columns,
+        })
+
+    return entities
+
+
+def _pg_to_ts_type(pg_type: str) -> str:
+    """Convert PostgreSQL type to TypeScript type."""
+    pg_type = pg_type.upper()
+    if any(t in pg_type for t in ("INT", "SERIAL", "NUMERIC", "DECIMAL", "FLOAT", "DOUBLE", "REAL")):
+        return "number"
+    if "BOOL" in pg_type:
+        return "boolean"
+    return "string"
+
+
+def _pg_to_form_type(pg_type: str) -> str:
+    """Convert PostgreSQL type to HTML form input type."""
+    pg_type = pg_type.upper()
+    if any(t in pg_type for t in ("INT", "SERIAL", "NUMERIC", "DECIMAL", "FLOAT", "DOUBLE", "REAL")):
+        return "number"
+    if "BOOL" in pg_type:
+        return "checkbox"
+    if "TEXT" in pg_type and "VARCHAR" not in pg_type:
+        return "textarea"
+    if "DATE" in pg_type and "TIME" not in pg_type:
+        return "date"
+    return "text"
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# TEMPLATE RENDERING
+# ═══════════════════════════════════════════════════════════════════════
+
+
+def _render_scaffolding(
+    project_name: str,
+    project_title: str,
+    entities: list[dict],
+    theme: dict | None = None,
+) -> dict[str, str]:
+    """Render scaffolding files from Jinja2 templates.
+
+    This renders ONLY the foundation — config, CSS, reusable components,
+    API client, types, router setup. NOT the pages (those come from LLM).
+    """
+    if theme is None:
+        theme = {"mode": "dark", "brand_color": "#3b82f6", "brand_name": "blue"}
+
+    env = Environment(
+        loader=FileSystemLoader(str(TEMPLATE_DIR)),
+        keep_trailing_newline=True,
+    )
+
+    context = {
+        "project_name": project_name,
+        "project_title": project_title,
+        "entities": entities,
+        "theme": theme,
+    }
 
     files: dict[str, str] = {}
-    template_map = {
+
+    # ─── Root config files ────────────────────────────────────────────
+    root_templates = {
         "package.json": "package.json.j2",
         "vite.config.ts": "vite.config.ts.j2",
         "tsconfig.json": "tsconfig.json.j2",
         "tsconfig.node.json": "tsconfig.node.json.j2",
         "index.html": "index.html.j2",
-        "src/main.tsx": "main.tsx.j2",
-        "src/index.css": "index.css.j2",
     }
 
-    for output_path, template_name in template_map.items():
+    for output_path, template_name in root_templates.items():
         template = env.get_template(template_name)
         files[output_path] = template.render(**context)
+
+    # ─── src/ entry files ─────────────────────────────────────────────
+    files["src/main.tsx"] = env.get_template("main.tsx.j2").render(**context)
+    files["src/index.css"] = env.get_template("index.css.j2").render(**context)
+
+    # ─── Favicon ──────────────────────────────────────────────────────
+    files["public/favicon.svg"] = env.get_template("favicon.svg.j2").render(**context)
+
+    # ─── src/api/ ─────────────────────────────────────────────────────
+    files["src/api/client.ts"] = env.get_template("src/api/client.ts.j2").render(**context)
+
+    # ─── src/types/ ───────────────────────────────────────────────────
+    files["src/types/index.ts"] = env.get_template("src/types/index.ts.j2").render(**context)
+
+    # ─── src/components/ (reusable, pre-built) ────────────────────────
+    component_templates = {
+        "src/components/Layout.tsx": "src/components/Layout.tsx.j2",
+        "src/components/Sidebar.tsx": "src/components/Sidebar.tsx.j2",
+        "src/components/DataTable.tsx": "src/components/DataTable.tsx.j2",
+        "src/components/FormModal.tsx": "src/components/FormModal.tsx.j2",
+        "src/components/ConfirmDialog.tsx": "src/components/ConfirmDialog.tsx.j2",
+        "src/components/Toast.tsx": "src/components/Toast.tsx.j2",
+        "src/components/StatsCard.tsx": "src/components/StatsCard.tsx.j2",
+        "src/components/DetailPanel.tsx": "src/components/DetailPanel.tsx.j2",
+        "src/components/StatusBadge.tsx": "src/components/StatusBadge.tsx.j2",
+        "src/components/Tabs.tsx": "src/components/Tabs.tsx.j2",
+        "src/components/SearchFilter.tsx": "src/components/SearchFilter.tsx.j2",
+        "src/components/EmptyState.tsx": "src/components/EmptyState.tsx.j2",
+    }
+
+    for output_path, template_name in component_templates.items():
+        template = env.get_template(template_name)
+        files[output_path] = template.render(**context)
+
+    # ─── src/App.tsx (router — uses entity names for routes) ──────────
+    files["src/App.tsx"] = env.get_template("src/App.tsx.j2").render(**context)
+
+    logger.info(
+        f"Scaffolding rendered: {len(files)} files",
+        extra={"step": "frontend_dev"},
+    )
 
     return files
 
 
-def _generate_app_tsx(
-    entities_summary: str,
-    api_contract: str,
+def _render_fallback_pages(
+    project_name: str,
+    project_title: str,
+    entities: list[dict],
+) -> dict[str, str]:
+    """Render basic CRUD pages from templates (fallback if LLM fails)."""
+    env = Environment(
+        loader=FileSystemLoader(str(TEMPLATE_DIR)),
+        keep_trailing_newline=True,
+    )
+
+    context = {
+        "project_name": project_name,
+        "project_title": project_title,
+        "entities": entities,
+    }
+
+    files: dict[str, str] = {}
+
+    # Dashboard
+    files["src/pages/Dashboard.tsx"] = env.get_template("src/pages/Dashboard.tsx.j2").render(**context)
+
+    # Per-entity pages
+    entity_list_template = env.get_template("src/pages/EntityList.tsx.j2")
+    for entity in entities:
+        entity_context = {**context, "entity": entity}
+        file_path = f"src/pages/{entity['type_name']}List.tsx"
+        files[file_path] = entity_list_template.render(**entity_context)
+
+    return files
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# LLM-GENERATED BUSINESS PAGES
+# ═══════════════════════════════════════════════════════════════════════
+
+
+def _generate_business_pages(
+    entities: list[dict],
     data_model: dict,
+    api_contract: str,
+    user_prompt: str,
+    project_title: str,
     pipeline_type: str,
     prototype_context: str,
-) -> str:
-    """Generate App.tsx via a single LLM call with full context.
+) -> dict[str, str]:
+    """Generate business-logic pages via LLM using pre-built components.
 
-    The LLM only generates the React component code — all config files
-    and CSS are handled by templates.
+    The LLM generates:
+    - Dashboard.tsx with real business KPIs (not just row counts)
+    - Per-entity pages with workflow actions (Approve, Reject, Assign, etc.)
+    - Relationship-aware views (show employee name, not UUID)
 
-    For brownfield: the prototype context drives the UI layout and design.
-    For greenfield: generates a generic sidebar CRUD interface.
+    The LLM is CONSTRAINED to only use pre-built components and the API client.
     """
-    # Scale max_tokens based on complexity (number of entities)
-    tables = data_model.get("tables", [])
-    num_entities = len(tables)
-    # Complex apps (5+ entities) need more tokens to avoid truncation
-    if num_entities >= 5:
-        max_tokens = 64000
-    else:
-        max_tokens = 64000
+    llm = get_llm(max_tokens=32768)
 
-    llm = get_llm(max_tokens=max_tokens)
+    # Build rich context for the LLM
+    entity_info = json.dumps(
+        [
+            {
+                "name": e["name"],
+                "plural": e["plural"],
+                "type_name": e["type_name"],
+                "display_name": e["display_name"],
+                "display_name_plural": e["display_name_plural"],
+                "columns": [
+                    {"name": c["name"], "type": c["ts_type"], "form_type": c["form_type"], "nullable": c["nullable"]}
+                    for c in e["columns"]
+                ],
+            }
+            for e in entities
+        ],
+        indent=2,
+    )
 
-    # Build entity details for the prompt
-    tables = data_model.get("tables", [])
-    entity_details = []
-    for table in tables:
-        cols = [c for c in table.get("columns", []) if c["name"] not in ("id", "created_at", "updated_at")]
-        entity_details.append({
-            "name": table["name"],
-            "plural": table["name"] if table["name"].endswith("s") else f"{table['name']}s",
-            "columns": [{"name": c["name"], "type": c["data_type"], "nullable": c.get("nullable", True)} for c in cols],
-        })
-
-    if pipeline_type == "brownfield" and prototype_context:
-        # Brownfield: prototype context is the PRIMARY design instruction
-        # For complex apps, instruct LLM to focus on the visible page only
-        complexity_note = ""
-        if num_entities >= 5:
-            complexity_note = (
-                "\n\n## IMPORTANT: Keep Code Concise\n"
-                "This app has many entities. To avoid code truncation:\n"
-                "- Focus on the MAIN page shown in the prototype (e.g., the Orders list)\n"
-                "- For sidebar navigation items, show placeholder pages with just a title\n"
-                "- Only implement full CRUD for the PRIMARY entity shown in the prototype\n"
-                "- Other entities get simple list views with basic fetch\n"
-                "- Keep the code under 1500 lines total\n"
+    # Identify relationships (FK columns)
+    relationships = []
+    for table in data_model.get("tables", []):
+        for fk in table.get("foreign_keys", []):
+            relationships.append(
+                f"{table['name']}.{fk['column']} → {fk['references_table']}.{fk['references_column']}"
             )
+    relationship_info = "\n".join(relationships) if relationships else "No explicit foreign keys defined, but columns ending in _id likely reference other entities."
 
-        prompt = f"""Generate a COMPLETE React App.tsx component that REPLICATES the user's prototype UI.
+    # Build the prompt
+    brownfield_context = ""
+    is_brownfield = pipeline_type == "brownfield" and prototype_context
+    if is_brownfield:
+        brownfield_context = f"""
 
-## CRITICAL: Replicate This UI Design
-{prototype_context[:4000]}{complexity_note}
+## PROTOTYPE TO REPLICATE (CRITICAL — match this UI exactly)
+{prototype_context[:4000]}
 
-## IMPORTANT INSTRUCTIONS
-- You MUST replicate the prototype's EXACT layout, theme, colors, and component structure
-- Do NOT use a generic sidebar + CRUD table layout unless the prototype specifically shows one
-- Match the prototype's visual style: colors, spacing, typography, component arrangement
-- If the prototype shows a light theme, use light colors (NOT dark navy backgrounds)
-- If the prototype shows inline lists with checkboxes, build that (NOT data tables)
-- If the prototype shows filter tabs, build filter tabs (NOT sidebar navigation)
-- The UI should look like the prototype, just backed by the real API
+BROWNFIELD RULES:
+- You MUST replicate the prototype's UI layout, navigation, color scheme, and interactions as closely as possible
+- If the prototype has a different layout than sidebar+content (e.g., top nav, full-width, multi-panel), generate a custom App.tsx that matches
+- If the prototype has charts, dashboards, KPI cards, or custom visualizations, replicate them
+- If the prototype uses specific colors/branding, use those colors in inline styles or CSS classes
+- The goal is: someone looking at the original prototype and the generated app should see the SAME application
+- You may use ANY valid React/TypeScript code — you are NOT limited to the pre-built components for brownfield
+- However, you MUST still use the apiClient for all API calls and the types from '../types'
+"""
 
-## Entities (data available via API)
-{json.dumps(entity_details, indent=2)}
+    prompt = f"""Generate the page components for a business application: "{project_title}"
 
-## API Contract
+## USER'S ORIGINAL REQUEST
+{user_prompt}
+
+## ENTITIES & FIELDS
+{entity_info}
+
+## RELATIONSHIPS
+{relationship_info}
+
+## API CONTRACT
 {api_contract}
+{brownfield_context}
 
-## Technical Requirements
-- Export a default App component
-- Use fetch() for API calls to /api/{{entity_plural}} (same origin, relative paths)
-- Use React useState and useEffect hooks for state management
-- Include loading states — use a div with className "spinner" (shows "Loading" text spinning in a circle)
-- Include error handling (show error message if API fails)
-- After create/update/delete, refresh the data
-- Use inline styles or CSS-in-JS to match the prototype's exact theme and colors
-- You MAY also use className references from index.css where they fit the prototype's design:
-  - Buttons: "btn btn-primary", "btn btn-danger", "btn btn-secondary"
-  - States: "spinner", "empty-state"
-  - Modal: "modal-overlay", "modal", "modal-title", "modal-actions"
-- If the prototype's design conflicts with index.css classes, use inline styles to match the prototype
-- Do NOT import any CSS file (index.css is already imported in main.tsx)
-- Do NOT use Tailwind classes
-- Return ONLY the TypeScript/React code, no markdown fences
-- The file MUST be complete and syntactically valid — no truncation"""
+## WHAT TO GENERATE
+Generate a JSON object where keys are file paths and values are COMPLETE TypeScript/React code.
 
-        system_msg = (
-            "You are a senior frontend developer. Generate a complete, valid React TypeScript component "
-            "that FAITHFULLY replicates the user's prototype UI design. The prototype's visual design "
-            "takes priority over any generic patterns. Match the layout, theme, colors, and interactions "
-            "shown in the prototype. Return ONLY code, no markdown."
-        )
-    else:
-        # Greenfield: generic CRUD interface with sidebar layout
-        prompt = f"""Generate a COMPLETE React App.tsx component for a CRUD application.
+Required files:
+{"1. src/App.tsx — ONLY for brownfield: Generate a custom App.tsx that replicates the prototype layout. Use React Router (Routes, Route, Navigate) and import your page components. If the prototype has a different navigation pattern (top nav, tabs, no sidebar), implement that." if is_brownfield else ""}
 
-## Entities
-{json.dumps(entity_details, indent=2)}
+{"2" if is_brownfield else "1"}. src/pages/Dashboard.tsx — Business dashboard with:
+   - Real KPIs relevant to the business (e.g., "Pending Approvals", "Active Employees", "WFH Today")
+   - NOT just row counts — compute meaningful stats from the data
+   - Recent activity section showing latest records from the most important entity
+   - Quick action buttons
+{"   - For brownfield: replicate the prototype's dashboard/home page layout exactly" if is_brownfield else ""}
 
-## API Contract
-{api_contract}
+{"3" if is_brownfield else "2"}. One page per entity: src/pages/{{TypeName}}List.tsx — Each page should have:
+   - Search/filter functionality
+   - Data table with meaningful columns (show related entity names if possible, not raw UUIDs)
+   - WORKFLOW ACTIONS appropriate to the business:
+     * If entity has a "status" field → Add Approve/Reject/Submit buttons that update status via PUT
+     * If entity represents a request → Show pending items prominently, add action buttons
+     * If entity has relationships → Show related data inline where useful
+   - Create/Edit forms with proper field types
+   - Detail view for individual records
+   - Delete with confirmation
+   - Toast notifications for all actions
 
-## Requirements
-- Export a default App component
-- Use a sidebar layout: left sidebar with nav links for each entity, main content area on the right
-- Implement full CRUD for each entity: List (table), Create (form), Edit (form), Delete (button)
-- Use fetch() for API calls to /api/{{entity_plural}} (same origin, relative paths)
-- Use React useState and useEffect hooks for state management
-- Show the active entity's data in the main content area
-- Tables should show all columns (except id, created_at, updated_at)
-- Forms should have inputs for all editable columns
-- Include loading states — use a div with className "spinner" (shows "Loading" text spinning in a circle)
-- Include error handling (show error message if API fails)
-- After create/update/delete, refresh the list
-- Use className references to the CSS classes defined in index.css:
-  - Layout: "app-layout", "sidebar", "sidebar-title", "nav-item", "nav-item active", "main-content"
-  - Page: "page-header", "page-title"
-  - Buttons: "btn btn-primary", "btn btn-danger", "btn btn-secondary", "btn-sm"
-  - Cards: "card", "card-body"
-  - Tables: "data-table", "actions"
-  - Forms: "form-group", "form-label", "form-input", "form-select", "form-textarea"
-  - States: "spinner", "empty-state"
-  - Modal: "modal-overlay", "modal", "modal-title", "modal-actions"
-- Do NOT import any CSS file (index.css is already imported in main.tsx)
-- Do NOT use Tailwind classes
-- Return ONLY the TypeScript/React code, no markdown fences
-- The file MUST be complete and syntactically valid — no truncation"""
+## STRICT IMPORT RULES (MUST follow exactly — violation = build failure)
+You can ONLY import from these modules:
 
-        system_msg = "Generate a complete, valid React TypeScript component. Return ONLY code, no markdown. The component must compile without errors."
+```
+import React, {{ useState, useEffect, useCallback, useMemo }} from 'react'
+import {{ useNavigate, Routes, Route, Navigate, NavLink, Outlet }} from 'react-router-dom'
+import {{ format, formatDistanceToNow, parseISO, isToday, isThisWeek }} from 'date-fns'
+import {{ BarChart, Bar, LineChart, Line, PieChart, Pie, Cell, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, AreaChart, Area }} from 'recharts'
+import {{ Users, Calendar, CheckCircle, XCircle, Clock, Search, Plus, Edit, Trash2, ChevronRight, Home, BarChart3, FileText, Bell, Settings, Filter, Download, Upload, ArrowUpRight, ArrowDownRight, TrendingUp, AlertCircle, Mail, Phone, MapPin, Building, Briefcase, Shield, Star, Heart, Zap, Activity }} from 'lucide-react'
+import DataTable, {{ Column }} from '../components/DataTable'
+import FormModal, {{ FormField }} from '../components/FormModal'
+import ConfirmDialog from '../components/ConfirmDialog'
+import Toast, {{ ToastMessage }} from '../components/Toast'
+import StatsCard, {{ StatItem }} from '../components/StatsCard'
+import DetailPanel, {{ DetailField }} from '../components/DetailPanel'
+import StatusBadge from '../components/StatusBadge'
+import Tabs, {{ Tab }} from '../components/Tabs'
+import SearchFilter, {{ FilterOption }} from '../components/SearchFilter'
+import EmptyState from '../components/EmptyState'
+import apiClient from '../api/client'
+import {{ ...types... }} from '../types'
+```
+
+{"For brownfield App.tsx, import pages as: import DashboardPage from './pages/Dashboard' etc." if is_brownfield else ""}
+{"For brownfield, you MAY write custom JSX with inline styles to match the prototype exactly." if is_brownfield else ""}
+
+DO NOT import: axios, lodash, moment, dayjs, any external library not listed above.
+DO NOT use: Tailwind classes.
+{"You CAN use inline styles (style={{...}}) for brownfield to match prototype colors/layout." if is_brownfield else "DO NOT use inline styles with {{}}."}
+
+## ICONS & VISUALS
+- Use lucide-react icons extensively — they make the app look professional:
+  * Navigation: Home, Users, Calendar, FileText, Settings, Bell
+  * Actions: Plus, Edit, Trash2, Download, Upload, Filter, Search
+  * Status: CheckCircle, XCircle, Clock, AlertCircle, Shield
+  * Metrics: TrendingUp, ArrowUpRight, ArrowDownRight, Activity, BarChart3
+  * Domain: Mail, Phone, MapPin, Building, Briefcase, Star, Heart, Zap
+- Use icons in: sidebar nav items, page headers, buttons, stat cards, table actions, empty states
+- Use date-fns to format dates: format(parseISO(date), 'MMM d, yyyy'), formatDistanceToNow(parseISO(date), {{ addSuffix: true }})
+- Use recharts for Dashboard charts: BarChart for comparisons, LineChart/AreaChart for trends, PieChart for distributions
+- Use emojis sparingly as supplements, not replacements for icons
+
+## CSS CLASSES AVAILABLE (use className)
+Layout: "app-layout", "sidebar", "sidebar-title", "sidebar-nav", "nav-item", "main-content"
+Page: "page-header", "page-title", "header-bar"
+Buttons: "btn btn-primary", "btn btn-danger", "btn btn-secondary", "btn btn-ghost", "btn-sm", "btn-lg"
+Cards: "card", "card-body", "card-header", "card-title"
+Tables: "data-table", "actions"
+Forms: "form-group", "form-label", "form-input", "form-select", "form-textarea", "form-error"
+States: "spinner", "empty-state", "empty-state-icon"
+Modal: "modal-overlay", "modal", "modal-sm", "modal-title", "modal-message", "modal-actions"
+Alerts: "alert alert-error", "alert alert-success", "alert alert-warning"
+Badges: "badge badge-success", "badge badge-warning", "badge badge-danger", "badge badge-info", "badge-sm"
+Stats: "stats-grid", "stat-card", "stat-label", "stat-value", "stat-change", "stat-change-positive", "stat-change-negative"
+Dashboard: "dashboard-grid", "dashboard-card", "quick-actions", "quick-action-btn", "quick-action-label", "quick-action-desc"
+Search: "search-filter-bar"
+Detail: "detail-panel", "detail-header", "detail-title", "detail-grid", "detail-field", "detail-field-label", "detail-field-value"
+Tabs: "tabs", "tab-item", "tab-active", "tab-count"
+Pagination: "pagination", "pagination-info", "pagination-buttons", "pagination-btn", "pagination-btn active"
+Breadcrumb: "breadcrumb", "breadcrumb-item", "breadcrumb-separator", "breadcrumb-current"
+Charts: "chart-container" (wrap recharts ResponsiveContainer in this)
+Avatar: "avatar", "avatar-sm", "avatar-lg"
+Notification: "notification-bell", "notification-badge"
+Utility: "text-muted", "text-secondary", "font-mono", "truncate"
+
+## API CLIENT USAGE
+```typescript
+// List with search/filter/pagination
+apiClient.getAll<EntityType>('entity_plural')
+apiClient.getAll<EntityType>('entity_plural', { search: 'text', status: 'pending', limit: 20, offset: 0 })
+
+// Single record
+apiClient.getById<EntityType>('entity_plural', id)
+
+// Create / Update / Delete
+apiClient.create<EntityType>('entity_plural', data)
+apiClient.update<EntityType>('entity_plural', id, data)
+apiClient.delete('entity_plural', id)
+
+// Stats (for Dashboard KPIs and charts)
+apiClient.getStats('entity_plural')  // returns { total, by_status: {pending: 3, approved: 5}, today_count, week_count }
+
+// Workflow status change (Approve/Reject buttons)
+apiClient.updateStatus<EntityType>('entity_plural', id, 'approved')
+apiClient.updateStatus<EntityType>('entity_plural', id, 'rejected')
+```
+
+Also import: { StatsResponse, PaginatedParams } from '../api/client' if needed.
+
+## OUTPUT FORMAT
+Return ONLY a valid JSON object (no markdown fences):
+{{
+  "src/pages/Dashboard.tsx": "...complete code...",
+  "src/pages/EmployeeList.tsx": "...complete code...",
+  ...
+}}
+
+Each file MUST:
+- Export a default React.FC component
+- Be complete (no truncation, no "// ... rest of code")
+- Compile without TypeScript errors
+- Use ONLY the imports listed above"""
 
     response = llm.invoke(
         [
-            SystemMessage(content=system_msg),
+            SystemMessage(
+                content=(
+                    "You are a senior React developer building a real business application. "
+                    "Generate COMPLETE page components with actual business logic — workflow actions, "
+                    "status transitions, relationship-aware views, meaningful dashboards. "
+                    "Return ONLY valid JSON mapping file paths to complete TypeScript code. "
+                    "Every file must compile. Only use the imports listed in the rules."
+                )
+            ),
             HumanMessage(content=prompt),
         ]
     )
 
-    return _strip_markdown(response.content)
+    content = _strip_markdown(response.content)
 
+    # Parse the JSON response
+    try:
+        page_files = json.loads(content)
+    except json.JSONDecodeError:
+        # Try to extract JSON from the response
+        json_match = re.search(r'\{[\s\S]*\}', content)
+        if json_match:
+            page_files = json.loads(json_match.group())
+        else:
+            raise ValueError("LLM did not return valid JSON for page files")
 
-def _generate_frontend_files(entities_summary: str, data_model: dict, backend_files: dict) -> dict[str, str] | None:
-    """Generate React source files using LLM.
+    # Validate: ensure all expected pages exist
+    expected_pages = ["src/pages/Dashboard.tsx"] + [
+        f"src/pages/{e['type_name']}List.tsx" for e in entities
+    ]
 
-    Returns dict of file_path -> content, or None if generation fails.
-    """
-    llm = get_llm(max_tokens=2048)
+    for expected in expected_pages:
+        if expected not in page_files:
+            logger.warning(f"LLM missing page: {expected}", extra={"step": "frontend_dev"})
 
-    # Plan
-    response = llm.invoke(
-        [
-            SystemMessage(content=_get_frontend_plan_prompt()),
-            HumanMessage(content=f"Plan for:\n{entities_summary}"),
-        ]
+    # Validate: strip any forbidden imports
+    for path, code in list(page_files.items()):
+        code = _strip_markdown(code)
+        code = _sanitize_imports(code)
+        page_files[path] = code
+
+    # For brownfield: if LLM generated App.tsx, include it (overrides template)
+    if "src/App.tsx" in page_files:
+        logger.info("Brownfield: LLM generated custom App.tsx (overriding template)", extra={"step": "frontend_dev"})
+
+    logger.info(
+        f"LLM generated {len(page_files)} business pages",
+        extra={"step": "frontend_dev"},
     )
 
-    try:
-        file_list = json.loads(_strip_markdown(response.content))
-    except (json.JSONDecodeError, ValueError):
-        file_list = [
-            "package.json",
-            "vite.config.ts",
-            "tsconfig.json",
-            "tsconfig.node.json",
-            "index.html",
-            "src/main.tsx",
-            "src/App.tsx",
-            "src/index.css",
-        ]
-
-    # Extract API contract from backend files for accurate frontend generation
-    api_contract = _extract_api_contract(backend_files, data_model)
-
-    # Generate each file
-    llm_gen = get_llm(max_tokens=16384)
-    files: dict[str, str] = {}
-
-    for file_path in file_list:
-        logger.info(f"Generating frontend: {file_path}", extra={"step": "frontend_dev"})
-
-        if file_path == "package.json":
-            prompt = _build_package_json_prompt(entities_summary)
-        else:
-            template = _get_frontend_file_prompt()
-            # Safe replacement — only replace known placeholders, leave others intact
-            prompt = template.replace("{file_path}", file_path).replace("{entities_summary}", entities_summary)
-            prompt += f"\n\nAPI Contract (use these exact paths):\n{api_contract}"
-
-        response = llm_gen.invoke(
-            [
-                SystemMessage(content=f"Generate ONLY the content for the file '{file_path}'. "
-                              f"This is a {file_path.split('.')[-1]} file. "
-                              f"Do NOT include React components in config files. "
-                              f"Do NOT include JSON in .ts/.tsx files. "
-                              f"Return ONLY valid content for this specific file type. No markdown."),
-                HumanMessage(content=prompt),
-            ]
-        )
-        files[file_path] = _strip_markdown(response.content)
-
-    # Validate we got the critical files
-    if "package.json" not in files:
-        logger.warning("Missing package.json in generated files")
-        return None
-
-    return files
+    return page_files
 
 
-def _build_package_json_prompt(entities_summary: str) -> str:
-    """Build a specific prompt for package.json to ensure correct build setup."""
-    return f"""Generate a complete package.json for a React + Vite + TypeScript CRUD app.
+def _sanitize_imports(code: str) -> str:
+    """Remove any forbidden imports from LLM-generated code."""
+    forbidden_patterns = [
+        r"import .* from ['\"]axios['\"]",
+        r"import .* from ['\"]lodash['\"]",
+        r"import .* from ['\"]moment['\"]",
+        r"import .* from ['\"]dayjs['\"]",
+        r"import .* from ['\"]\./.*\.css['\"]",
+        r"import .* from ['\"]@mui/.*['\"]",
+        r"import .* from ['\"]antd['\"]",
+        r"import .* from ['\"]@chakra-ui/.*['\"]",
+        r"import .* from ['\"]@emotion/.*['\"]",
+        r"import .* from ['\"]styled-components['\"]",
+        r"import .* from ['\"]tailwindcss['\"]",
+    ]
 
-Entities: {entities_summary}
+    lines = code.split("\n")
+    cleaned = []
+    for line in lines:
+        is_forbidden = False
+        for pattern in forbidden_patterns:
+            if re.match(pattern, line.strip()):
+                is_forbidden = True
+                break
+        if not is_forbidden:
+            cleaned.append(line)
 
-REQUIREMENTS:
-- name: use a simple lowercase name
-- "private": true
-- "type": "module"
-- scripts:
-  - "dev": "vite"
-  - "build": "vite build"
-  - "preview": "vite preview"
-- dependencies (use EXACT versions, no ^ or ~):
-  - "react": "18.2.0"
-  - "react-dom": "18.2.0"
-- devDependencies (use EXACT versions, no ^ or ~):
-  - "@types/react": "18.2.45"
-  - "@types/react-dom": "18.2.18"
-  - "@vitejs/plugin-react": "4.2.1"
-  - "typescript": "5.3.3"
-  - "vite": "5.0.10"
-
-Return ONLY the JSON, no markdown fences.
-"""
+    return "\n".join(cleaned)
 
 
-def _generate_brownfield_frontend(
-    entities_summary: str, data_model: dict, api_contract: str, prototype_context: str
+# ═══════════════════════════════════════════════════════════════════════
+# STATIC HTML FALLBACK (when Databricks Job build is unavailable)
+# ═══════════════════════════════════════════════════════════════════════
+
+
+def _generate_static_fallback(
+    entities: list[dict], data_model: dict, api_contract: str
 ) -> dict[str, str]:
-    """Generate frontend that replicates the prototype's UI faithfully.
+    """Generate a complete static HTML page with CRUD for all entities.
 
-    Uses the prototype_context (UI description, features, layout) to build
-    a production-quality frontend that matches the original prototype's
-    look and functionality, not just generic CRUD.
+    Uses LLM but with very tight constraints and the full design system
+    embedded in the prompt.
     """
     llm = get_llm(max_tokens=16384)
 
@@ -564,57 +706,38 @@ def _generate_brownfield_frontend(
             f"    API prefix: /api/{entity_plural}\n"
             f"    Fields: {', '.join(col_names)}\n"
             f"    Endpoints: GET /api/{entity_plural}, POST /api/{entity_plural}, "
-            f"GET /api/{entity_plural}/{{id}}, PUT /api/{entity_plural}/{{id}}, DELETE /api/{entity_plural}/{{id}}"
+            f"GET /api/{entity_plural}/{{id}}, PUT /api/{entity_plural}/{{id}}, "
+            f"DELETE /api/{entity_plural}/{{id}}"
         )
     api_info = "\n".join(api_routes)
 
+    entities_summary = "\n".join(
+        f"{e['name']}: {', '.join(c['name'] for c in e['columns'])}" for e in entities
+    )
+
+    system_prompt = _get_static_fallback_system_prompt()
+
     response = llm.invoke(
         [
-            SystemMessage(
-                content="""You are a senior frontend developer. Generate a COMPLETE single-page HTML application that REPLICATES the prototype described below.
-
-This is a BROWNFIELD migration — the goal is to recreate the prototype's UI and functionality at production quality, NOT to create a generic CRUD interface.
-
-CRITICAL REQUIREMENTS:
-- REPLICATE the prototype's EXACT visual design: theme, colors, layout, and component structure
-- If the prototype uses a LIGHT theme, use light colors (cream/white backgrounds, dark text)
-- If the prototype uses a DARK theme, use dark colors (navy backgrounds, light text)
-- Do NOT force a dark theme if the prototype shows a light theme
-- Match the prototype's layout: if it shows a single-page list, build that (NOT a sidebar + tables)
-- Match the prototype's interactions: checkboxes, filter tabs, inline editing, etc.
-- Use CSS custom properties for theming
-- Use vanilla JavaScript (no framework needed for static HTML)
-- Use fetch() for ALL API calls to the backend
-- API calls must use the EXACT paths provided
-- Include ALL features described in the prototype (filters, badges, clear completed, etc.)
-- Loading state: show a spinning circle with "Loading" text inside it (text rotates with the circle)
-- Make it responsive and production-quality
-- Include proper loading states, error handling, and empty states
-- Return ONLY the complete HTML file, no markdown fences
-
-The generated HTML should look and behave like the original prototype, just backed by the new API."""
-            ),
+            SystemMessage(content=system_prompt),
             HumanMessage(
-                content=f"""## Prototype Context (replicate this UI faithfully)
-{prototype_context}
+                content=f"""Build a CRUD UI for these entities:
 
-## Data Model (entities available via API)
 {entities_summary}
 
-## EXACT API Routes (use these paths)
+EXACT API routes (use these paths exactly, do not change them):
 {api_info}
 
-## Backend API Contract
+BACKEND API CONTRACT:
 {api_contract}
 
 IMPORTANT:
-- Recreate the prototype's UI — don't just make generic CRUD tables
-- If the prototype has a dashboard, build a dashboard
-- If it has specific workflows or multi-step forms, replicate them
-- Use the same visual style/approach described in the prototype context
-- All API calls use relative paths (same origin)
-- POST/PUT bodies include all fields EXCEPT id, created_at, updated_at
-- IDs are UUID strings"""
+- POST body must include all fields EXCEPT id, created_at, updated_at
+- PUT body should only include fields being updated
+- All responses return JSON objects/arrays
+- IDs are UUID strings
+- The API is on the same origin (use relative paths like /api/...)
+- On page load, fetch and display data for the first entity immediately"""
             ),
         ]
     )
@@ -626,15 +749,13 @@ IMPORTANT:
     }
 
 
-def _generate_static_fallback(entities_summary: str, data_model: dict, api_contract: str) -> dict[str, str]:
-    """Generate a complete static HTML page with tabs for all entities.
-
-    This is the fallback when the Databricks Job build is unavailable.
-    """
+def _generate_brownfield_static_fallback(
+    entities: list[dict], data_model: dict, api_contract: str, prototype_context: str
+) -> dict[str, str]:
+    """Generate static HTML that replicates the prototype UI (brownfield fallback)."""
     llm = get_llm(max_tokens=16384)
 
     tables = data_model.get("tables", [])
-
     api_routes = []
     for table in tables:
         entity_name = table["name"]
@@ -645,14 +766,78 @@ def _generate_static_fallback(entities_summary: str, data_model: dict, api_contr
             f"  - Entity: {entity_name}\n"
             f"    API prefix: /api/{entity_plural}\n"
             f"    Fields: {', '.join(col_names)}\n"
-            f"    Endpoints: GET, POST, GET/id, PUT/id, DELETE/id"
+            f"    Endpoints: GET /api/{entity_plural}, POST /api/{entity_plural}, "
+            f"GET /api/{entity_plural}/{{id}}, PUT /api/{entity_plural}/{{id}}, "
+            f"DELETE /api/{entity_plural}/{{id}}"
         )
     api_info = "\n".join(api_routes)
+
+    entities_summary = "\n".join(
+        f"{e['name']}: {', '.join(c['name'] for c in e['columns'])}" for e in entities
+    )
 
     response = llm.invoke(
         [
             SystemMessage(
-                content="""Generate a COMPLETE single-page HTML app with inline JavaScript and CSS.
+                content="""You are a senior frontend developer. Generate a COMPLETE single-page HTML application that REPLICATES the prototype described below.
+
+This is a BROWNFIELD migration — recreate the prototype's UI at production quality.
+
+CRITICAL REQUIREMENTS:
+- Use a DARK THEME design system:
+  - Background: #0f172a, Surface: #1e293b, Borders: #334155
+  - Primary: #3b82f6, Danger: #ef4444, Success: #22c55e
+  - Text: #f1f5f9 (primary), #94a3b8 (secondary), #64748b (muted)
+  - Inputs: bg #0f172a, border #334155, focus ring blue
+  - Buttons: rounded-lg, font-weight 600, hover shadow
+  - Cards: bg #1e293b, border #334155, rounded-xl
+- Layout: sidebar (260px) + main content (padding 32px)
+- Replicate the prototype's ACTUAL UI layout, pages, navigation, and interactions
+- Use CSS custom properties for theming
+- Use vanilla JavaScript (no framework)
+- Use fetch() for ALL API calls
+- API calls must use the EXACT paths provided
+- Include ALL features described in the prototype
+- Include proper loading states, error handling, and empty states
+- Return ONLY the complete HTML file, no markdown fences"""
+            ),
+            HumanMessage(
+                content=f"""## Prototype Context (replicate this UI faithfully)
+{prototype_context[:4000]}
+
+## Data Model
+{entities_summary}
+
+## EXACT API Routes
+{api_info}
+
+## Backend API Contract
+{api_contract}
+
+IMPORTANT:
+- Recreate the prototype's UI — don't just make generic CRUD tables
+- All API calls use relative paths (same origin)
+- POST/PUT bodies include all fields EXCEPT id, created_at, updated_at
+- IDs are UUID strings"""
+            ),
+        ]
+    )
+
+    html_content = _strip_markdown(response.content)
+    return {"static/index.html": html_content}
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# HELPERS
+# ═══════════════════════════════════════════════════════════════════════
+
+
+def _get_static_fallback_system_prompt() -> str:
+    """Load the static fallback prompt from DB/YAML or use built-in."""
+    try:
+        return get_system_prompt("frontend_static_fallback")
+    except KeyError:
+        return """Generate a COMPLETE single-page HTML app with inline JavaScript and CSS.
 
 REQUIREMENTS:
 - Use a DARK THEME design system with these colors:
@@ -677,7 +862,7 @@ REQUIREMENTS:
 - Font: Inter (system-ui fallback), 14px body, 24px page titles
 - All transitions: 150ms ease
 - Use CSS custom properties for theming (define :root variables)
-- Create a tabbed interface via sidebar with one section per entity
+- Create a sidebar interface with one section per entity
 - Each section has: a create form, and a data table showing all records with edit/delete buttons
 - Use fetch() for ALL API calls (GET, POST, PUT, DELETE)
 - API calls must use the EXACT paths provided (do not guess or change them)
@@ -686,39 +871,13 @@ REQUIREMENTS:
 - All CRUD operations must work: Create, Read (list + detail), Update, Delete
 - Forms must submit JSON with Content-Type: application/json
 - After create/update/delete, refresh the list
+- Include toast notifications for success/error feedback
+- Include confirm dialog before delete
 - Return ONLY the complete HTML file, no markdown fences"""
-            ),
-            HumanMessage(
-                content=f"""Build a CRUD UI for these entities:
-
-{entities_summary}
-
-EXACT API routes (use these paths exactly, do not change them):
-{api_info}
-
-BACKEND API CONTRACT (extracted from actual route files):
-{api_contract}
-
-IMPORTANT:
-- POST body must include all fields EXCEPT id, created_at, updated_at
-- PUT body should only include fields being updated
-- All responses return JSON objects/arrays
-- IDs are UUID strings
-- The API is on the same origin (no CORS needed, use relative paths like /api/...)
-- On page load, fetch and display data for the first tab immediately"""
-            ),
-        ]
-    )
-
-    html_content = _strip_markdown(response.content)
-
-    return {
-        "static/index.html": html_content,
-    }
 
 
 def _extract_api_contract(backend_files: dict[str, str], data_model: dict) -> str:
-    """Extract the API contract from actual backend route files."""
+    """Extract the API contract from the data model."""
     contract_parts = []
 
     tables = data_model.get("tables", [])
@@ -729,32 +888,44 @@ def _extract_api_contract(backend_files: dict[str, str], data_model: dict) -> st
         columns = table.get("columns", [])
         create_fields = [c["name"] for c in columns if c["name"] not in ("id", "created_at", "updated_at")]
         all_fields = [c["name"] for c in columns]
+        has_status = any(c["name"] == "status" for c in columns)
+        fk_columns = [c["name"] for c in columns if c["name"].endswith("_id") and c["name"] != "id"]
 
-        contract_parts.append(
+        contract = (
             f"Entity: {entity_name}\n"
             f"  API Base: /api/{entity_plural}\n"
-            f"  GET /api/{entity_plural} - returns array of objects with fields: {', '.join(all_fields)}\n"
-            f"  POST /api/{entity_plural} - body: {{{', '.join(f'{f}: value' for f in create_fields)}}}\n"
-            f"  GET /api/{entity_plural}/{{id}} - returns single object\n"
-            f"  PUT /api/{entity_plural}/{{id}} - body: only fields to update\n"
-            f"  DELETE /api/{entity_plural}/{{id}} - returns 204 No Content"
+            f"  GET /api/{entity_plural} - list all (supports ?search=text&status=value&limit=N&offset=M)\n"
+            f"    Returns: array of objects with fields: {', '.join(all_fields)}"
         )
+
+        # Add joined field info
+        if fk_columns:
+            joined_fields = [f"{fk}_name" for fk in fk_columns]
+            contract += f"\n    Also includes joined fields: {', '.join(joined_fields)} (human-readable names from related tables)"
+
+        contract += (
+            f"\n  GET /api/{entity_plural}/stats - returns {{total, by_status: {{status: count}}, today_count, week_count}}"
+            f"\n  POST /api/{entity_plural} - body: {{{', '.join(f'{f}: value' for f in create_fields)}}}"
+            f"\n  GET /api/{entity_plural}/{{id}} - returns single object"
+            f"\n  PUT /api/{entity_plural}/{{id}} - body: only fields to update"
+            f"\n  DELETE /api/{entity_plural}/{{id}} - returns 204 No Content"
+        )
+
+        if has_status:
+            contract += f"\n  PATCH /api/{entity_plural}/{{id}}/status - body: {{\"status\": \"new_value\"}} (for workflow actions)"
+
+        contract_parts.append(contract)
 
     return "\n\n".join(contract_parts)
 
 
-def _summarize_entities(data_model: dict) -> str:
-    tables = data_model.get("tables", [])
-    parts = []
-    for table in tables:
-        cols = [c["name"] for c in table.get("columns", []) if c["name"] not in ("id", "created_at", "updated_at")]
-        parts.append(f"{table['name']}: {', '.join(cols)}")
-    return "\n".join(parts)
-
-
 def _strip_markdown(text: str) -> str:
+    """Strip markdown code fences from LLM output."""
     text = text.strip()
-    for prefix in ("```python", "```typescript", "```tsx", "```json", "```html", "```javascript", "```css", "```"):
+    for prefix in (
+        "```python", "```typescript", "```tsx", "```json",
+        "```html", "```javascript", "```css", "```",
+    ):
         if text.startswith(prefix):
             text = text[len(prefix):]
             break

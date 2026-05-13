@@ -1,0 +1,131 @@
+import React, { useState, useEffect, useCallback } from 'react'
+import { useNavigate } from 'react-router-dom'
+import StatsCard, { StatItem } from '../components/StatsCard'
+import apiClient from '../api/client'
+
+{% for entity in entities %}
+import { {{ entity.type_name }} } from '../types'
+{% endfor %}
+
+const Dashboard: React.FC = () => {
+  const navigate = useNavigate()
+  const [stats, setStats] = useState<StatItem[]>([])
+  const [recentItems, setRecentItems] = useState<Record<string, any[]>>({})
+  const [loading, setLoading] = useState(true)
+
+  const fetchDashboardData = useCallback(async () => {
+    try {
+      setLoading(true)
+      const results = await Promise.allSettled([
+{% for entity in entities %}
+        apiClient.getAll<{{ entity.type_name }}>('{{ entity.plural }}'),
+{% endfor %}
+      ])
+
+      const counts: number[] = results.map((r) =>
+        r.status === 'fulfilled' ? r.value.length : 0
+      )
+
+      const entityNames = [{{ entities | map(attribute='display_name_plural') | map('tojson') | join(', ') }}]
+
+      setStats(
+        entityNames.map((name, idx) => ({
+          label: `Total ${name}`,
+          value: counts[idx],
+          change: counts[idx] > 0 ? 'Active' : 'Empty',
+          changeType: counts[idx] > 0 ? 'positive' as const : 'neutral' as const,
+        }))
+      )
+
+      // Get recent items from first entity
+{% if entities | length > 0 %}
+      if (results[0].status === 'fulfilled') {
+        setRecentItems({ '{{ entities[0].plural }}': results[0].value.slice(0, 5) })
+      }
+{% endif %}
+    } catch (err) {
+      console.error('Dashboard fetch error:', err)
+    } finally {
+      setLoading(false)
+    }
+  }, [])
+
+  useEffect(() => {
+    fetchDashboardData()
+  }, [fetchDashboardData])
+
+  return (
+    <>
+      <div className="page-header">
+        <h1 className="page-title">Dashboard</h1>
+      </div>
+
+      <StatsCard stats={stats} loading={loading} />
+
+      <div className="dashboard-grid">
+        {/* Recent Activity */}
+        <div className="card dashboard-card">
+          <div className="card-header">
+            <h3 className="card-title">Recent {{ entities[0].display_name_plural }}</h3>
+            <button
+              className="btn btn-ghost btn-sm"
+              onClick={() => navigate('/{{ entities[0].plural }}')}
+            >
+              View All →
+            </button>
+          </div>
+          <div className="card-body">
+            {loading ? (
+              <div className="spinner" />
+            ) : (recentItems['{{ entities[0].plural }}'] || []).length === 0 ? (
+              <div className="empty-state">
+                <p>No {{ entities[0].display_name_plural | lower }} yet</p>
+              </div>
+            ) : (
+              <table className="data-table">
+                <thead>
+                  <tr>
+{% for col in entities[0].columns[:4] %}
+                    <th>{{ col.label }}</th>
+{% endfor %}
+                  </tr>
+                </thead>
+                <tbody>
+                  {(recentItems['{{ entities[0].plural }}'] || []).map((item: any, idx: number) => (
+                    <tr key={item.id || idx}>
+{% for col in entities[0].columns[:4] %}
+                      <td>{item.{{ col.name }} ?? '—'}</td>
+{% endfor %}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </div>
+        </div>
+
+        {/* Quick Actions */}
+        <div className="card dashboard-card">
+          <div className="card-header">
+            <h3 className="card-title">Quick Actions</h3>
+          </div>
+          <div className="card-body">
+            <div className="quick-actions">
+{% for entity in entities %}
+              <button
+                className="quick-action-btn"
+                onClick={() => navigate('/{{ entity.plural }}')}
+              >
+                <span className="quick-action-label">{{ entity.display_name_plural }}</span>
+                <span className="quick-action-desc">View & manage</span>
+              </button>
+{% endfor %}
+            </div>
+          </div>
+        </div>
+      </div>
+    </>
+  )
+}
+
+export default Dashboard

@@ -1,0 +1,36 @@
+/**
+ * TypeScript interfaces — auto-generated from data model.
+ * Do not edit manually.
+ */
+
+{% for entity in entities %}
+export interface {{ entity.type_name }} {
+  id: string
+{% for col in entity.columns %}
+{% if col.nullable %}
+  {{ col.name }}{% if col.optional %}?{% endif %}: {{ col.ts_type }} | null
+{% else %}
+  {{ col.name }}: {{ col.ts_type }}
+{% endif %}
+{% endfor %}
+  created_at: string
+  updated_at: string
+}
+
+export interface {{ entity.type_name }}Create {
+{% for col in entity.columns %}
+{% if col.nullable %}
+  {{ col.name }}?: {{ col.ts_type }} | null
+{% else %}
+  {{ col.name }}: {{ col.ts_type }}
+{% endif %}
+{% endfor %}
+}
+
+export interface {{ entity.type_name }}Update {
+{% for col in entity.columns %}
+  {{ col.name }}?: {{ col.ts_type }} | null
+{% endfor %}
+}
+
+{% endfor %}

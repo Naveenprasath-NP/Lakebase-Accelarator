@@ -1,0 +1,23 @@
+import React from 'react'
+import { Routes, Route, Navigate } from 'react-router-dom'
+import Layout from './components/Layout'
+import Dashboard from './pages/Dashboard'
+{% for entity in entities %}
+import {{ entity.type_name }}List from './pages/{{ entity.type_name }}List'
+{% endfor %}
+
+const App: React.FC = () => {
+  return (
+    <Routes>
+      <Route element={<Layout />}>
+        <Route path="/" element={<Dashboard />} />
+{% for entity in entities %}
+        <Route path="/{{ entity.plural }}" element={<{{ entity.type_name }}List />} />
+{% endfor %}
+        <Route path="*" element={<Navigate to="/" replace />} />
+      </Route>
+    </Routes>
+  )
+}
+
+export default App

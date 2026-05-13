@@ -1,0 +1,51 @@
+import React from 'react'
+
+interface StatusBadgeProps {
+  status: string
+  size?: 'sm' | 'md'
+}
+
+const STATUS_STYLES: Record<string, { className: string }> = {
+  // Positive states
+  active: { className: 'badge badge-success' },
+  completed: { className: 'badge badge-success' },
+  approved: { className: 'badge badge-success' },
+  resolved: { className: 'badge badge-success' },
+  paid: { className: 'badge badge-success' },
+  delivered: { className: 'badge badge-success' },
+  open: { className: 'badge badge-success' },
+
+  // Warning states
+  pending: { className: 'badge badge-warning' },
+  in_progress: { className: 'badge badge-warning' },
+  processing: { className: 'badge badge-warning' },
+  review: { className: 'badge badge-warning' },
+  shipped: { className: 'badge badge-warning' },
+  draft: { className: 'badge badge-warning' },
+
+  // Danger states
+  failed: { className: 'badge badge-danger' },
+  cancelled: { className: 'badge badge-danger' },
+  rejected: { className: 'badge badge-danger' },
+  overdue: { className: 'badge badge-danger' },
+  closed: { className: 'badge badge-danger' },
+  inactive: { className: 'badge badge-danger' },
+
+  // Info states
+  new: { className: 'badge badge-info' },
+  scheduled: { className: 'badge badge-info' },
+  assigned: { className: 'badge badge-info' },
+}
+
+const StatusBadge: React.FC<StatusBadgeProps> = ({ status, size = 'md' }) => {
+  const normalized = status.toLowerCase().replace(/[\s-]/g, '_')
+  const style = STATUS_STYLES[normalized] || { className: 'badge badge-info' }
+
+  return (
+    <span className={`${style.className}${size === 'sm' ? ' badge-sm' : ''}`}>
+      {status.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase())}
+    </span>
+  )
+}
+
+export default StatusBadge

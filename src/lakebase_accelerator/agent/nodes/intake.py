@@ -19,8 +19,9 @@ INTAKE_SYSTEM_PROMPT = """You are a business analyst. Analyze the user's prompt 
 You MUST return valid JSON with this exact structure:
 {
   "is_sufficient": true/false,
-  "clarification_questions": ["question1", "question2"],
+  "clarification_questions": [],
   "project_name": "kebab-case-name",
+  "theme": {"mode": "dark", "brand_color": "#3b82f6", "brand_name": "blue"},
   "entities": [
     {
       "name": "entity_name_singular_snake_case",
@@ -38,11 +39,16 @@ You MUST return valid JSON with this exact structure:
 
 Rules:
 - Set is_sufficient=false ONLY if the prompt is extremely vague (less than 5 words or no discernible domain)
+- If is_sufficient=true, clarification_questions MUST be an empty array []
 - Every entity MUST have: id (UUID PK), created_at (TIMESTAMPTZ), updated_at (TIMESTAMPTZ)
 - Use PostgreSQL types: UUID, TEXT, VARCHAR(n), INTEGER, BOOLEAN, TIMESTAMPTZ, JSONB, NUMERIC
 - project_name must be kebab-case
 - Entity names are singular snake_case
-- Return ONLY the JSON, no markdown, no explanation
+- Keep entities focused: max 6-8 entities, max 8-10 attributes per entity (excluding id, created_at, updated_at)
+- theme.mode: "dark" (default) or "light" — only set to "light" if user explicitly asks for light/white theme
+- theme.brand_color: hex color for primary brand — default "#3b82f6" (blue). Change ONLY if user mentions a specific color (e.g., "green theme" → "#22c55e", "red" → "#ef4444", "purple" → "#8b5cf6", "orange" → "#f97316", "yellow" → "#eab308")
+- theme.brand_name: human-readable color name (e.g., "blue", "green", "purple")
+- Return ONLY the JSON, no markdown, no explanation, no trailing text
 """
 
 
@@ -50,7 +56,7 @@ def intake_node(state: PipelineState) -> dict:
     """Analyze the user prompt and extract structured requirements."""
     logger.info("Node: intake_agent — analyzing prompt", extra={"step": "intake"})
 
-    llm = get_llm(max_tokens=8192)
+    llm = get_llm(max_tokens=32768)
 
     response = llm.invoke(
         [
@@ -65,7 +71,7 @@ def intake_node(state: PipelineState) -> dict:
     except (json.JSONDecodeError, ValueError) as e:
         logger.warning(f"Intake agent returned invalid JSON, retrying: {e}")
         # Retry once with higher token limit
-        llm_retry = get_llm(max_tokens=16384)
+        llm_retry = get_llm(max_tokens=32768)
         response = llm_retry.invoke(
             [
                 SystemMessage(content=INTAKE_SYSTEM_PROMPT),
@@ -98,6 +104,7 @@ def intake_node(state: PipelineState) -> dict:
         "project_name": project_name,
         "entities": result.get("entities", []),
         "relationships": result.get("relationships", []),
+        "theme": result.get("theme", {"mode": "dark", "brand_color": "#3b82f6", "brand_name": "blue"}),
         "current_step": "intake",
         "completed_steps": ["intake"],
     }

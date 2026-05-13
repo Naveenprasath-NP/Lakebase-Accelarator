@@ -1,0 +1,49 @@
+import React from 'react'
+
+export interface StatItem {
+  label: string
+  value: string | number
+  change?: string
+  changeType?: 'positive' | 'negative' | 'neutral'
+  icon?: string
+}
+
+interface StatsCardProps {
+  stats: StatItem[]
+  loading?: boolean
+}
+
+const StatsCard: React.FC<StatsCardProps> = ({ stats, loading = false }) => {
+  if (loading) {
+    return (
+      <div className="stats-grid">
+        {[1, 2, 3, 4].map((i) => (
+          <div key={i} className="stat-card stat-card-skeleton">
+            <div className="skeleton-line skeleton-sm" />
+            <div className="skeleton-line skeleton-lg" />
+          </div>
+        ))}
+      </div>
+    )
+  }
+
+  return (
+    <div className="stats-grid">
+      {stats.map((stat, idx) => (
+        <div key={idx} className="stat-card">
+          <div className="stat-label">{stat.label}</div>
+          <div className="stat-value">{stat.value}</div>
+          {stat.change && (
+            <div className={`stat-change stat-change-${stat.changeType || 'neutral'}`}>
+              {stat.changeType === 'positive' && '↑ '}
+              {stat.changeType === 'negative' && '↓ '}
+              {stat.change}
+            </div>
+          )}
+        </div>
+      ))}
+    </div>
+  )
+}
+
+export default StatsCard
