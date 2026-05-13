@@ -184,26 +184,55 @@ async def execute_pipeline(
 
             # Stream node-by-node updates with heartbeat to prevent proxy timeout
             HEARTBEAT_INTERVAL = 15  # seconds — keep connection alive during long LLM calls
-            last_event_time = _time.time()
 
-            async def heartbeat_generator():
-                """Wrap graph.astream with periodic heartbeats to prevent HTTP/2 proxy timeouts."""
-                nonlocal last_event_time
+            async def stream_with_heartbeat():
+                """Yield graph events interspersed with heartbeats to prevent HTTP/2 proxy timeouts.
+
+                Uses asyncio.Task + asyncio.wait to avoid cancelling the underlying
+                async generator (asyncio.wait_for would corrupt it).
+                """
                 stream = graph.astream(initial_state, stream_mode="updates")
+                next_event_task = None
 
-                while True:
-                    try:
-                        # Wait for next graph event with a timeout
-                        event = await asyncio.wait_for(stream.__anext__(), timeout=HEARTBEAT_INTERVAL)
-                        last_event_time = _time.time()
-                        yield ("event", event)
-                    except asyncio.TimeoutError:
-                        # No event received within interval — emit heartbeat to keep connection alive
-                        yield ("heartbeat", None)
-                    except StopAsyncIteration:
-                        break
+                try:
+                    while True:
+                        # Create a task for the next event if we don't have one pending
+                        if next_event_task is None:
+                            next_event_task = asyncio.ensure_future(stream.__anext__())
 
-            async for event_type, event in heartbeat_generator():
+                        # Wait for either the event to arrive or the heartbeat interval
+                        done, _ = await asyncio.wait(
+                            {next_event_task},
+                            timeout=HEARTBEAT_INTERVAL,
+                        )
+
+                        if done:
+                            # Event arrived — yield it
+                            try:
+                                event = next_event_task.result()
+                                next_event_task = None
+                                yield ("event", event)
+                            except StopAsyncIteration:
+                                break
+                            except Exception:
+                                # If the task raised an unexpected error, re-raise
+                                next_event_task = None
+                                raise
+                        else:
+                            # Timeout — emit heartbeat, keep waiting for the same task
+                            yield ("heartbeat", None)
+                except StopAsyncIteration:
+                    pass
+                finally:
+                    # Clean up any pending task
+                    if next_event_task and not next_event_task.done():
+                        next_event_task.cancel()
+                        try:
+                            await next_event_task
+                        except (asyncio.CancelledError, StopAsyncIteration):
+                            pass
+
+            async for event_type, event in stream_with_heartbeat():
                 if event_type == "heartbeat":
                     heartbeat_data = {
                         "step": "processing",
