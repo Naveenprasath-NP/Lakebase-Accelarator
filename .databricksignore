@@ -5,6 +5,8 @@ tests/
 design/
 Define/
 scripts/
+FE/
+node_modules/
 .env.sample
 .gitignore
 Makefile

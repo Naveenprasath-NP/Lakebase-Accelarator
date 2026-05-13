@@ -1,6 +1,17 @@
-"""Project routes — unified pipeline execution, list, and detail endpoints."""
+"""Project routes — pipeline execution, SSE events, list, and detail endpoints.
 
+Architecture:
+- POST /execute → validates input, starts pipeline as background asyncio.Task,
+  returns project_id immediately.
+- GET /projects/{id}/events → reconnectable SSE stream that reads from an
+  in-memory event store. If the Databricks Apps proxy drops the connection
+  (~5 min hard timeout), the frontend reconnects with Last-Event-ID and
+  picks up where it left off. The pipeline continues running regardless.
+"""
+
+import asyncio
 import json
+import time as _time
 from datetime import UTC, datetime
 
 from fastapi import APIRouter, File, Form, UploadFile
@@ -25,6 +36,11 @@ from lakebase_accelerator.models.responses import (
     success_response,
 )
 from lakebase_accelerator.services.dependencies import get_audit_service, get_volume_upload_service
+from lakebase_accelerator.services.pipeline_event_store import (
+    PipelineRun,
+    create_pipeline_run,
+    get_pipeline_run,
+)
 from lakebase_accelerator.services.volume_upload_service import FileValidationError
 from lakebase_accelerator.settings import PROMPT_MAX_LENGTH, PROMPT_MIN_LENGTH
 from lakebase_accelerator.utils.logger import logger
@@ -32,8 +48,22 @@ from lakebase_accelerator.utils.logger import logger
 router = APIRouter(prefix="/api/v1/projects", tags=["Projects"])
 
 
+def _log_task_exception(task: asyncio.Task) -> None:
+    """Callback to log exceptions from background tasks that would otherwise be swallowed."""
+    try:
+        exc = task.exception()
+        if exc:
+            logger.error(
+                f"Background pipeline task failed with exception: {exc}",
+                exc_info=exc,
+                extra={"step": "pipeline_bg"},
+            )
+    except asyncio.CancelledError:
+        logger.warning("Background pipeline task was cancelled", extra={"step": "pipeline_bg"})
+
+
 # ═══════════════════════════════════════════════════════════════════════
-# UNIFIED PIPELINE ENDPOINT (SSE)
+# PIPELINE EXECUTION (Background Task)
 # ═══════════════════════════════════════════════════════════════════════
 
 
@@ -43,13 +73,16 @@ async def execute_pipeline(
     prompt: str = Form(...),
     files: list[UploadFile] | None = File(None),
 ) -> StreamingResponse | JSONResponse:
-    """Execute the accelerator pipeline via multi-agent LangGraph orchestrator.
+    """Start the accelerator pipeline as a background task.
 
     Accepts multipart/form-data for both greenfield and brownfield:
     - Greenfield: type=greenfield, prompt=<text> (no files needed)
     - Brownfield: type=brownfield, prompt=<text>, files=<binary uploads>
 
-    Returns an SSE stream with real-time progress as each node executes.
+    Returns an SSE stream with real-time progress. The pipeline runs as a
+    background task, so if the connection drops (Databricks Apps ~5 min proxy
+    timeout), the frontend can reconnect via GET /projects/{id}/events?last_event_id=N
+    to resume receiving events without losing progress.
     """
     # ─── Validate type ───────────────────────────────────────────────
     if type not in ("greenfield", "brownfield"):
@@ -102,12 +135,47 @@ async def execute_pipeline(
         resp = error_response(message="Pipeline not available. Check dependencies.", status_code=503)
         return JSONResponse(status_code=503, content=resp.model_dump())
 
-    # Initial state (project_id injected after audit record creation)
+    # ─── Create audit record ─────────────────────────────────────────
+    project_id = None
+    try:
+        audit = get_audit_service()
+        project_id = await audit.create_project_record(
+            project_name="",
+            schema_name="",
+            mode=type,
+            prompt=prompt,
+            uploaded_files=[
+                {"name": path.rsplit("/", 1)[-1], "volume_path": path}
+                for path in volume_paths
+            ] if volume_paths else None,
+        )
+        logger.info(f"Audit record created: {project_id}", extra={"step": "audit"})
+
+        # Save user prompt as first chat message
+        if project_id:
+            await audit.append_chat_message(
+                project_id=project_id,
+                role="user",
+                content=prompt,
+                message_type="message",
+            )
+    except Exception as e:
+        logger.warning(f"Failed to create audit record: {e}")
+
+    if not project_id:
+        # Generate a temporary ID if audit fails
+        import uuid
+        project_id = str(uuid.uuid4())
+
+    # ─── Create event store and start background task ────────────────
+    pipeline_run = create_pipeline_run(project_id)
+
+    # Initial state
     initial_state = {
         "messages": [],
         "prompt": prompt,
         "project_name": "",
-        "project_id": "",
+        "project_id": project_id,
         "pipeline_type": type,
         "volume_paths": volume_paths,
         "is_sufficient": True,
@@ -136,377 +204,54 @@ async def execute_pipeline(
         "error": "",
     }
 
+    # Launch pipeline in background — runs independently of HTTP connection
+    task = asyncio.create_task(
+        _run_pipeline_background(graph, initial_state, pipeline_run, type, project_id, prompt, volume_paths)
+    )
+    # Log unhandled exceptions from the background task (otherwise they're silently swallowed)
+    task.add_done_callback(_log_task_exception)
+
+    # Return SSE stream that reads from the event store (backward compatible with frontend)
+    # The pipeline runs in the background; this stream just relays events.
+    # If the proxy kills this connection, the frontend can reconnect via
+    # GET /projects/{project_id}/events?last_event_id=N
+    HEARTBEAT_INTERVAL = 15  # seconds
+    stream_start = _time.time()
+
     async def event_stream():
-        """Stream SSE events as the pipeline graph executes."""
-        import asyncio
-        import time as _time
+        """Relay events from background pipeline to SSE stream."""
+        cursor = 0
 
-        pipeline_start = _time.time()
-        project_id = None
+        while True:
+            new_events = [e for e in pipeline_run.events if e.event_id > cursor]
 
-        # Create audit record at pipeline start
-        try:
-            audit = get_audit_service()
-            project_id = await audit.create_project_record(
-                project_name="",
-                schema_name="",
-                mode=type,
-                prompt=prompt,
-                uploaded_files=[
-                    {"name": path.rsplit("/", 1)[-1], "volume_path": path}
-                    for path in volume_paths
-                ] if volume_paths else None,
-            )
-            # Inject project_id into pipeline state so checkpoint can use it
-            initial_state["project_id"] = project_id or ""
-            logger.info(f"Audit record created: {project_id}", extra={"step": "audit"})
+            for event in new_events:
+                cursor = event.event_id
+                yield f"id: {event.event_id}\nevent: {event.event_type}\ndata: {json.dumps(event.data)}\n\n"
 
-            # Save user prompt as first chat message
-            if project_id:
-                await audit.append_chat_message(
-                    project_id=project_id,
-                    role="user",
-                    content=prompt,
-                    message_type="message",
+                if event.event_type == "pipeline_complete":
+                    return
+
+            if pipeline_run.is_complete:
+                return
+
+            try:
+                await asyncio.wait_for(
+                    _wait_for_notify(pipeline_run),
+                    timeout=HEARTBEAT_INTERVAL,
                 )
-        except Exception as e:
-            logger.warning(f"Failed to create audit record: {e}")
-
-        try:
-            final_update = {}
-
-            # Accumulate key data from steps (for DB save + pipeline_complete SSE)
-            accumulated_schema_name = ""
-            accumulated_table_names: list[str] = []
-            accumulated_app_url = ""
-            accumulated_app_name = ""
-            accumulated_project_name = ""
-
-            # Stream node-by-node updates with heartbeat to prevent proxy timeout
-            HEARTBEAT_INTERVAL = 15  # seconds — keep connection alive during long LLM calls
-
-            async def stream_with_heartbeat():
-                """Yield graph events interspersed with heartbeats to prevent HTTP/2 proxy timeouts.
-
-                Uses asyncio.Task + asyncio.wait to avoid cancelling the underlying
-                async generator (asyncio.wait_for would corrupt it).
-                """
-                stream = graph.astream(initial_state, stream_mode="updates")
-                next_event_task = None
-
-                try:
-                    while True:
-                        # Create a task for the next event if we don't have one pending
-                        if next_event_task is None:
-                            next_event_task = asyncio.ensure_future(stream.__anext__())
-
-                        # Wait for either the event to arrive or the heartbeat interval
-                        done, _ = await asyncio.wait(
-                            {next_event_task},
-                            timeout=HEARTBEAT_INTERVAL,
-                        )
-
-                        if done:
-                            # Event arrived — yield it
-                            try:
-                                event = next_event_task.result()
-                                next_event_task = None
-                                yield ("event", event)
-                            except StopAsyncIteration:
-                                break
-                            except Exception:
-                                # If the task raised an unexpected error, re-raise
-                                next_event_task = None
-                                raise
-                        else:
-                            # Timeout — emit heartbeat, keep waiting for the same task
-                            yield ("heartbeat", None)
-                except StopAsyncIteration:
-                    pass
-                finally:
-                    # Clean up any pending task
-                    if next_event_task and not next_event_task.done():
-                        next_event_task.cancel()
-                        try:
-                            await next_event_task
-                        except (asyncio.CancelledError, StopAsyncIteration):
-                            pass
-
-            async for event_type, event in stream_with_heartbeat():
-                if event_type == "heartbeat":
-                    heartbeat_data = {
-                        "step": "processing",
-                        "status": "heartbeat",
-                        "message": "Pipeline is processing...",
-                        "data": {"elapsed_seconds": round(_time.time() - pipeline_start)},
-                        "timestamp": datetime.now(UTC).isoformat(),
-                    }
-                    yield f"event: heartbeat\ndata: {json.dumps(heartbeat_data)}\n\n"
-                    continue
-
-                # event is a dict of {node_name: state_update}
-                for node_name, update in event.items():
-                    # Accumulate data from specific steps
-                    if update.get("schema_name"):
-                        accumulated_schema_name = update["schema_name"]
-                    if update.get("table_names"):
-                        accumulated_table_names = update["table_names"]
-                    if update.get("app_url"):
-                        accumulated_app_url = update["app_url"]
-                    if update.get("app_name"):
-                        accumulated_app_name = update["app_name"]
-                    if update.get("project_name"):
-                        accumulated_project_name = update["project_name"]
-                    final_update = update  # Track last update for final state
-                    current_step = update.get("current_step", node_name)
-                    error = update.get("error", "")
-
-                    # ─── Checkpoint SSE Extensions ────────────────────
-                    # Detect checkpoint timeout (error contains "timed out")
-                    if error and "timed out" in error.lower():
-                        timeout_data = {
-                            "step": current_step,
-                            "status": "timeout",
-                            "message": error,
-                            "data": {
-                                "checkpoint_type": current_step,
-                                "timeout_seconds": CONFIRMATION_TIMEOUT_SECONDS,
-                            },
-                            "timestamp": datetime.now(UTC).isoformat(),
-                        }
-                        yield f"event: confirmation_timeout\ndata: {json.dumps(timeout_data)}\n\n"
-                        continue
-
-                    # Detect awaiting_checkpoint (non-empty) → emit awaiting_confirmation
-                    awaiting = update.get("awaiting_checkpoint", "")
-                    if awaiting:
-                        checkpoint_data = update.get("checkpoint_data", {})
-                        awaiting_data = {
-                            "step": current_step,
-                            "status": "awaiting_confirmation",
-                            "message": f"Awaiting user confirmation at checkpoint: {awaiting}",
-                            "data": {
-                                "checkpoint_type": awaiting,
-                                "checkpoint_data": checkpoint_data,
-                            },
-                            "timestamp": datetime.now(UTC).isoformat(),
-                        }
-                        yield f"event: awaiting_confirmation\ndata: {json.dumps(awaiting_data)}\n\n"
-                        continue
-
-                    # Detect confirmation received: awaiting_checkpoint cleared + user_corrections present
-                    # This happens when a checkpoint node returns after user confirms
-                    if (
-                        "awaiting_checkpoint" in update
-                        and update.get("awaiting_checkpoint") == ""
-                        and update.get("user_corrections") is not None
-                    ):
-                        confirmed_data = {
-                            "step": current_step,
-                            "status": "confirmed",
-                            "message": f"User confirmation received for checkpoint: {current_step}",
-                            "data": {
-                                "checkpoint_type": current_step,
-                                "has_corrections": bool(update.get("user_corrections")),
-                            },
-                            "timestamp": datetime.now(UTC).isoformat(),
-                        }
-                        yield f"event: confirmation_received\ndata: {json.dumps(confirmed_data)}\n\n"
-
-                        # Save user confirmation to chat history
-                        if project_id:
-                            try:
-                                corrections = update.get("user_corrections", {})
-                                if corrections:
-                                    user_feedback = corrections.get("user_feedback", str(corrections))
-                                    await audit.append_chat_message(
-                                        project_id=project_id,
-                                        role="user",
-                                        content=user_feedback,
-                                        message_type="checkpoint_correction",
-                                    )
-                                else:
-                                    await audit.append_chat_message(
-                                        project_id=project_id,
-                                        role="user",
-                                        content="Approved",
-                                        message_type="checkpoint_approval",
-                                    )
-                            except Exception:
-                                pass
-
-                        resumed_data = {
-                            "step": current_step,
-                            "status": "resumed",
-                            "message": f"Pipeline resumed after checkpoint: {current_step}",
-                            "data": {
-                                "checkpoint_type": current_step,
-                                "next_step": current_step,
-                            },
-                            "timestamp": datetime.now(UTC).isoformat(),
-                        }
-                        yield f"event: step_resumed\ndata: {json.dumps(resumed_data)}\n\n"
-
-                        continue
-
-                    # ─── Existing SSE Events (unchanged format) ───────
-                    if error:
-                        sse_data = {
-                            "step": current_step,
-                            "status": "failed",
-                            "message": error,
-                            "data": {"error_code": "STEP_FAILED"},
-                            "timestamp": datetime.now(UTC).isoformat(),
-                        }
-                        yield f"event: step_failed\ndata: {json.dumps(sse_data)}\n\n"
-                    else:
-                        step_data = _extract_step_data(node_name, update)
-                        sse_data = {
-                            "step": current_step,
-                            "status": "completed",
-                            "message": _step_message(node_name, update),
-                            "data": step_data,
-                            "timestamp": datetime.now(UTC).isoformat(),
-                        }
-                        yield f"event: step_completed\ndata: {json.dumps(sse_data)}\n\n"
-
-                        # ─── Pre-emit awaiting_confirmation for checkpoint nodes ───
-                        # Since checkpoint nodes BLOCK graph.astream (they await asyncio.Event),
-                        # we emit awaiting_confirmation immediately after the preceding step
-                        # completes, using the step's output data as checkpoint_data.
-                        _checkpoint_after = {
-                            "intake": "analysis_review",
-                            "brownfield_exploration": "analysis_review",
-                        }
-                        if node_name in _checkpoint_after:
-                            checkpoint_type = _checkpoint_after[node_name]
-                            checkpoint_project_name = update.get("project_name", accumulated_project_name)
-
-                            # Generate LLM summary for the checkpoint approval UI
-                            summary_md = _generate_checkpoint_summary(
-                                entities=update.get("entities", []),
-                                relationships=update.get("relationships", []),
-                                tech_stack=update.get("tech_stack", {}),
-                                project_name=checkpoint_project_name,
-                                pipeline_type=type,
-                            )
-
-                            awaiting_data = {
-                                "step": checkpoint_type,
-                                "status": "awaiting_confirmation",
-                                "message": f"Awaiting user confirmation at checkpoint: {checkpoint_type}",
-                                "project_id": project_id,
-                                "project_name": checkpoint_project_name,
-                                "data": {
-                                    "checkpoint_type": checkpoint_type,
-                                    "summary": summary_md,
-                                },
-                                "timestamp": datetime.now(UTC).isoformat(),
-                            }
-                            yield f"event: awaiting_confirmation\ndata: {json.dumps(awaiting_data)}\n\n"
-
-                            # Save checkpoint summary to chat history
-                            if project_id:
-                                try:
-                                    await audit.append_chat_message(
-                                        project_id=project_id,
-                                        role="agent",
-                                        content=summary_md,
-                                        message_type="checkpoint_summary",
-                                    )
-                                except Exception:
-                                    pass
-
-            # Pipeline complete — use the last update to determine outcome
-            pipeline_duration = _time.time() - pipeline_start
-
-            if final_update.get("error"):
-                # Update audit: failed
-                if project_id:
-                    try:
-                        await audit.update_project_failed(
-                            project_id=project_id,
-                            failure_step=final_update.get("current_step", "unknown"),
-                            failure_message=final_update.get("error", "")[:500],
-                        )
-                    except Exception:
-                        pass
-
-                complete_data = {
-                    "step": None,
-                    "status": "failed",
-                    "message": f"Pipeline failed: {final_update['error']}",
+            except asyncio.TimeoutError:
+                heartbeat_data = {
+                    "step": "processing",
+                    "status": "heartbeat",
+                    "message": "Pipeline is processing...",
                     "data": {
-                        "error_code": "PIPELINE_FAILED",
-                        "failed_step": final_update.get("current_step"),
-                        "completed_steps": final_update.get("completed_steps", []),
+                        "elapsed_seconds": round(_time.time() - stream_start),
+                        "project_id": project_id,
                     },
                     "timestamp": datetime.now(UTC).isoformat(),
                 }
-            elif final_update.get("is_sufficient") is False:
-                complete_data = {
-                    "step": None,
-                    "status": "needs_clarification",
-                    "message": "More information needed",
-                    "data": {"clarification_questions": final_update.get("clarification_questions", [])},
-                    "timestamp": datetime.now(UTC).isoformat(),
-                }
-            else:
-                # Update audit: completed — use accumulated values from all steps
-                if project_id:
-                    try:
-                        await audit.update_project_completed(
-                            project_id=project_id,
-                            app_name=accumulated_app_name or final_update.get("app_name", ""),
-                            app_url=accumulated_app_url or final_update.get("app_url", ""),
-                            tables_created=accumulated_table_names or final_update.get("table_names", []),
-                            pipeline_duration_seconds=pipeline_duration,
-                            schema_name=accumulated_schema_name or final_update.get("schema_name", ""),
-                            project_name=accumulated_project_name,
-                        )
-                    except Exception:
-                        pass
-
-                complete_data = {
-                    "step": None,
-                    "status": "completed",
-                    "message": "App deployed successfully",
-                    "data": {
-                        "app_url": accumulated_app_url or final_update.get("app_url", ""),
-                        "app_name": accumulated_app_name or final_update.get("app_name", ""),
-                        "schema_name": accumulated_schema_name or final_update.get("schema_name", ""),
-                        "catalog": "lakebase_accelerator_poc",
-                        "tables_created": accumulated_table_names or final_update.get("table_names", []),
-                        "completed_steps": final_update.get("completed_steps", []),
-                        "pipeline_duration_seconds": round(pipeline_duration, 1),
-                    },
-                    "timestamp": datetime.now(UTC).isoformat(),
-                }
-
-            yield f"event: pipeline_complete\ndata: {json.dumps(complete_data)}\n\n"
-
-        except Exception as e:
-            logger.exception(f"Pipeline error: {e}")
-
-            # Update audit: failed
-            if project_id:
-                try:
-                    await audit.update_project_failed(
-                        project_id=project_id,
-                        failure_step="pipeline_error",
-                        failure_message=str(e)[:500],
-                    )
-                except Exception:
-                    pass
-
-            error_data = {
-                "step": None,
-                "status": "failed",
-                "message": f"Pipeline error: {str(e)[:300]}",
-                "data": {"error_code": "AGENT_ERROR"},
-                "timestamp": datetime.now(UTC).isoformat(),
-            }
-            yield f"event: pipeline_complete\ndata: {json.dumps(error_data)}\n\n"
+                yield f"id: 0\nevent: heartbeat\ndata: {json.dumps(heartbeat_data)}\n\n"
 
     return StreamingResponse(
         event_stream(),
@@ -519,6 +264,385 @@ async def execute_pipeline(
             "Content-Encoding": "identity",
         },
     )
+
+
+async def _run_pipeline_background(
+    graph,
+    initial_state: dict,
+    pipeline_run: PipelineRun,
+    pipeline_type: str,
+    project_id: str,
+    prompt: str,
+    volume_paths: list[str],
+) -> None:
+    """Run the pipeline graph as a background task, pushing events to the store.
+
+    This function runs independently of any HTTP connection. Events are stored
+    in-memory and consumed by the SSE endpoint when clients connect.
+    """
+    logger.info(f"Background pipeline task started: {project_id}", extra={"step": "pipeline_bg"})
+    pipeline_start = _time.time()
+
+    # Accumulate key data from steps
+    accumulated_schema_name = ""
+    accumulated_table_names: list[str] = []
+    accumulated_app_url = ""
+    accumulated_app_name = ""
+    accumulated_project_name = ""
+    final_update = {}
+
+    try:
+        async for event in graph.astream(initial_state, stream_mode="updates"):
+            for node_name, update in event.items():
+                logger.info(
+                    f"Pipeline node completed: {node_name}",
+                    extra={"step": "pipeline_bg", "project_id": project_id, "node": node_name},
+                )
+                # Accumulate data from specific steps
+                if update.get("schema_name"):
+                    accumulated_schema_name = update["schema_name"]
+                if update.get("table_names"):
+                    accumulated_table_names = update["table_names"]
+                if update.get("app_url"):
+                    accumulated_app_url = update["app_url"]
+                if update.get("app_name"):
+                    accumulated_app_name = update["app_name"]
+                if update.get("project_name"):
+                    accumulated_project_name = update["project_name"]
+                final_update = update
+                current_step = update.get("current_step", node_name)
+                error = update.get("error", "")
+
+                # ─── Checkpoint SSE Extensions ────────────────────
+                if error and "timed out" in error.lower():
+                    pipeline_run.push_event("confirmation_timeout", {
+                        "step": current_step,
+                        "status": "timeout",
+                        "message": error,
+                        "data": {
+                            "checkpoint_type": current_step,
+                            "timeout_seconds": CONFIRMATION_TIMEOUT_SECONDS,
+                        },
+                        "timestamp": datetime.now(UTC).isoformat(),
+                    })
+                    continue
+
+                # Detect awaiting_checkpoint
+                awaiting = update.get("awaiting_checkpoint", "")
+                if awaiting:
+                    checkpoint_data = update.get("checkpoint_data", {})
+                    pipeline_run.push_event("awaiting_confirmation", {
+                        "step": current_step,
+                        "status": "awaiting_confirmation",
+                        "message": f"Awaiting user confirmation at checkpoint: {awaiting}",
+                        "data": {
+                            "checkpoint_type": awaiting,
+                            "checkpoint_data": checkpoint_data,
+                        },
+                        "timestamp": datetime.now(UTC).isoformat(),
+                    })
+                    continue
+
+                # Detect confirmation received
+                if (
+                    "awaiting_checkpoint" in update
+                    and update.get("awaiting_checkpoint") == ""
+                    and update.get("user_corrections") is not None
+                ):
+                    pipeline_run.push_event("confirmation_received", {
+                        "step": current_step,
+                        "status": "confirmed",
+                        "message": f"User confirmation received for checkpoint: {current_step}",
+                        "data": {
+                            "checkpoint_type": current_step,
+                            "has_corrections": bool(update.get("user_corrections")),
+                        },
+                        "timestamp": datetime.now(UTC).isoformat(),
+                    })
+
+                    # Save to chat history
+                    try:
+                        audit = get_audit_service()
+                        corrections = update.get("user_corrections", {})
+                        if corrections:
+                            user_feedback = corrections.get("user_feedback", str(corrections))
+                            await audit.append_chat_message(
+                                project_id=project_id,
+                                role="user",
+                                content=user_feedback,
+                                message_type="checkpoint_correction",
+                            )
+                        else:
+                            await audit.append_chat_message(
+                                project_id=project_id,
+                                role="user",
+                                content="Approved",
+                                message_type="checkpoint_approval",
+                            )
+                    except Exception:
+                        pass
+
+                    pipeline_run.push_event("step_resumed", {
+                        "step": current_step,
+                        "status": "resumed",
+                        "message": f"Pipeline resumed after checkpoint: {current_step}",
+                        "data": {
+                            "checkpoint_type": current_step,
+                            "next_step": current_step,
+                        },
+                        "timestamp": datetime.now(UTC).isoformat(),
+                    })
+                    continue
+
+                # ─── Standard step events ────────────────────────
+                if error:
+                    pipeline_run.push_event("step_failed", {
+                        "step": current_step,
+                        "status": "failed",
+                        "message": error,
+                        "data": {"error_code": "STEP_FAILED"},
+                        "timestamp": datetime.now(UTC).isoformat(),
+                    })
+                else:
+                    step_data = _extract_step_data(node_name, update)
+                    pipeline_run.push_event("step_completed", {
+                        "step": current_step,
+                        "status": "completed",
+                        "message": _step_message(node_name, update),
+                        "data": step_data,
+                        "timestamp": datetime.now(UTC).isoformat(),
+                    })
+
+                    # Pre-emit awaiting_confirmation for checkpoint nodes
+                    _checkpoint_after = {
+                        "intake": "analysis_review",
+                        "brownfield_exploration": "analysis_review",
+                    }
+                    if node_name in _checkpoint_after:
+                        checkpoint_type = _checkpoint_after[node_name]
+                        checkpoint_project_name = update.get("project_name", accumulated_project_name)
+
+                        summary_md = _generate_checkpoint_summary(
+                            entities=update.get("entities", []),
+                            relationships=update.get("relationships", []),
+                            tech_stack=update.get("tech_stack", {}),
+                            project_name=checkpoint_project_name,
+                            pipeline_type=pipeline_type,
+                        )
+
+                        pipeline_run.push_event("awaiting_confirmation", {
+                            "step": checkpoint_type,
+                            "status": "awaiting_confirmation",
+                            "message": f"Awaiting user confirmation at checkpoint: {checkpoint_type}",
+                            "project_id": project_id,
+                            "project_name": checkpoint_project_name,
+                            "data": {
+                                "checkpoint_type": checkpoint_type,
+                                "summary": summary_md,
+                            },
+                            "timestamp": datetime.now(UTC).isoformat(),
+                        })
+
+                        # Save checkpoint summary to chat history
+                        try:
+                            audit = get_audit_service()
+                            await audit.append_chat_message(
+                                project_id=project_id,
+                                role="agent",
+                                content=summary_md,
+                                message_type="checkpoint_summary",
+                            )
+                        except Exception:
+                            pass
+
+        # ─── Pipeline complete ───────────────────────────────────────
+        pipeline_duration = _time.time() - pipeline_start
+
+        if final_update.get("error"):
+            try:
+                audit = get_audit_service()
+                await audit.update_project_failed(
+                    project_id=project_id,
+                    failure_step=final_update.get("current_step", "unknown"),
+                    failure_message=final_update.get("error", "")[:500],
+                )
+            except Exception:
+                pass
+
+            pipeline_run.push_event("pipeline_complete", {
+                "step": None,
+                "status": "failed",
+                "message": f"Pipeline failed: {final_update['error']}",
+                "data": {
+                    "error_code": "PIPELINE_FAILED",
+                    "failed_step": final_update.get("current_step"),
+                    "completed_steps": final_update.get("completed_steps", []),
+                },
+                "timestamp": datetime.now(UTC).isoformat(),
+            })
+        elif final_update.get("is_sufficient") is False:
+            pipeline_run.push_event("pipeline_complete", {
+                "step": None,
+                "status": "needs_clarification",
+                "message": "More information needed",
+                "data": {"clarification_questions": final_update.get("clarification_questions", [])},
+                "timestamp": datetime.now(UTC).isoformat(),
+            })
+        else:
+            try:
+                audit = get_audit_service()
+                await audit.update_project_completed(
+                    project_id=project_id,
+                    app_name=accumulated_app_name or final_update.get("app_name", ""),
+                    app_url=accumulated_app_url or final_update.get("app_url", ""),
+                    tables_created=accumulated_table_names or final_update.get("table_names", []),
+                    pipeline_duration_seconds=pipeline_duration,
+                    schema_name=accumulated_schema_name or final_update.get("schema_name", ""),
+                    project_name=accumulated_project_name,
+                )
+                logger.info(
+                    f"Audit updated to completed: {project_id}, app_url={accumulated_app_url or final_update.get('app_url', '')}",
+                    extra={"step": "pipeline_bg"},
+                )
+            except Exception as e:
+                logger.error(f"Failed to update audit to completed: {e}", extra={"step": "pipeline_bg"})
+
+            pipeline_run.push_event("pipeline_complete", {
+                "step": None,
+                "status": "completed",
+                "message": "App deployed successfully",
+                "data": {
+                    "app_url": accumulated_app_url or final_update.get("app_url", ""),
+                    "app_name": accumulated_app_name or final_update.get("app_name", ""),
+                    "schema_name": accumulated_schema_name or final_update.get("schema_name", ""),
+                    "catalog": "lakebase_accelerator_poc",
+                    "tables_created": accumulated_table_names or final_update.get("table_names", []),
+                    "completed_steps": final_update.get("completed_steps", []),
+                    "pipeline_duration_seconds": round(pipeline_duration, 1),
+                },
+                "timestamp": datetime.now(UTC).isoformat(),
+            })
+            logger.info(f"Pipeline complete event pushed for: {project_id}", extra={"step": "pipeline_bg"})
+
+    except Exception as e:
+        logger.exception(f"Pipeline background task error: {e}")
+        try:
+            audit = get_audit_service()
+            await audit.update_project_failed(
+                project_id=project_id,
+                failure_step="pipeline_error",
+                failure_message=str(e)[:500],
+            )
+        except Exception:
+            pass
+
+        pipeline_run.push_event("pipeline_complete", {
+            "step": None,
+            "status": "failed",
+            "message": f"Pipeline error: {str(e)[:300]}",
+            "data": {"error_code": "AGENT_ERROR"},
+            "timestamp": datetime.now(UTC).isoformat(),
+        })
+    finally:
+        pipeline_run.mark_complete()
+        logger.info(
+            f"Background pipeline task finished: {project_id} (duration: {round(_time.time() - pipeline_start, 1)}s)",
+            extra={"step": "pipeline_bg"},
+        )
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# SSE EVENT STREAM (Reconnectable)
+# ═══════════════════════════════════════════════════════════════════════
+
+
+@router.get("/{project_id}/events", response_model=None)
+async def stream_pipeline_events(
+    project_id: str,
+    last_event_id: int = 0,
+) -> StreamingResponse | JSONResponse:
+    """Stream SSE events for a running pipeline. Supports reconnection.
+
+    Query params:
+        last_event_id: Resume from this event ID (0 = start from beginning).
+                       On reconnect, pass the last received event ID.
+
+    The stream emits:
+    - event: step_completed / step_failed / awaiting_confirmation / etc.
+    - event: heartbeat (every 15s to keep connection alive)
+    - event: pipeline_complete (terminal event)
+
+    If the connection drops (Databricks Apps ~5 min timeout), the frontend
+    reconnects with ?last_event_id=N and picks up where it left off.
+    """
+    pipeline_run = get_pipeline_run(project_id)
+
+    if not pipeline_run:
+        resp = error_response(
+            message=f"No active pipeline found for project '{project_id}'",
+            status_code=404,
+        )
+        return JSONResponse(status_code=404, content=resp.model_dump())
+
+    HEARTBEAT_INTERVAL = 15  # seconds
+    stream_start = _time.time()
+
+    async def event_stream():
+        """Yield SSE events from the pipeline run's event store."""
+        cursor = last_event_id  # Start from where the client left off
+
+        while True:
+            # Emit any events we haven't sent yet (replay on reconnect)
+            new_events = [e for e in pipeline_run.events if e.event_id > cursor]
+
+            for event in new_events:
+                cursor = event.event_id
+                yield f"id: {event.event_id}\nevent: {event.event_type}\ndata: {json.dumps(event.data)}\n\n"
+
+                # If this is the terminal event, stop
+                if event.event_type == "pipeline_complete":
+                    return
+
+            # If pipeline is done and we've sent all events, stop
+            if pipeline_run.is_complete:
+                return
+
+            # Wait for new events or emit heartbeat
+            try:
+                await asyncio.wait_for(
+                    _wait_for_notify(pipeline_run),
+                    timeout=HEARTBEAT_INTERVAL,
+                )
+            except asyncio.TimeoutError:
+                # No new events — emit heartbeat to keep connection alive
+                heartbeat_data = {
+                    "step": "processing",
+                    "status": "heartbeat",
+                    "message": "Pipeline is processing...",
+                    "data": {"elapsed_seconds": round(_time.time() - stream_start)},
+                    "timestamp": datetime.now(UTC).isoformat(),
+                }
+                yield f"event: heartbeat\ndata: {json.dumps(heartbeat_data)}\n\n"
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+            "Transfer-Encoding": "chunked",
+            "Content-Encoding": "identity",
+        },
+    )
+
+
+async def _wait_for_notify(pipeline_run: PipelineRun) -> None:
+    """Wait until the pipeline run pushes a new event."""
+    # We poll the event count since asyncio.Event.clear() is called immediately
+    initial_count = len(pipeline_run.events)
+    while len(pipeline_run.events) == initial_count and not pipeline_run.is_complete:
+        await asyncio.sleep(0.1)
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -679,16 +803,7 @@ async def confirm_checkpoint(project_id: str, body: ConfirmationRequest) -> JSON
 
 
 def _format_heartbeat_event(checkpoint_type: str, elapsed_seconds: int) -> str:
-    """Format a heartbeat SSE event.
-
-    Heartbeat events are emitted every 30 seconds while the pipeline is awaiting
-    user confirmation at a checkpoint. Since graph.astream blocks during checkpoint
-    waits, heartbeats are emitted by the checkpoint node internally via logging.
-    This helper formats the SSE event for cases where heartbeat emission is possible
-    (e.g., when using an async wrapper around the checkpoint wait).
-
-    Requirements: 2.42, 2.43
-    """
+    """Format a heartbeat SSE event."""
     heartbeat_data = {
         "step": checkpoint_type,
         "status": "heartbeat",
@@ -752,25 +867,9 @@ def _generate_checkpoint_summary(
     project_name: str,
     pipeline_type: str,
 ) -> str:
-    """Generate a business-level markdown summary for the checkpoint approval UI.
-
-    The LLM produces a concise, user-friendly overview of what will be built —
-    focused on the application's purpose, features, and plan rather than
-    technical schema details.
-
-    Args:
-        entities: List of entity dicts with name, description, attributes.
-        relationships: List of relationship dicts.
-        tech_stack: Tech stack dict (language, framework, etc.).
-        project_name: Project name for display.
-        pipeline_type: "greenfield" or "brownfield".
-
-    Returns:
-        Markdown string ready for FE rendering.
-    """
+    """Generate a business-level markdown summary for the checkpoint approval UI."""
     from lakebase_accelerator.agent.llm import get_llm
 
-    # Build context for the LLM
     entity_lines = []
     for e in entities:
         attrs = e.get("attributes", [])
