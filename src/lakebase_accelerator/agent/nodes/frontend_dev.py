@@ -65,10 +65,11 @@ def frontend_dev_node(state: PipelineState) -> dict:
     entities = _build_entity_context(data_model)
     api_contract = _extract_api_contract(backend_files, data_model)
     theme = state.get("theme", {"mode": "dark", "brand_color": "#3b82f6", "brand_name": "blue"})
+    layout = state.get("layout", "sidebar")
 
     # ─── Step 2: Render scaffolding from templates ────────────────────
     logger.info(
-        f"Rendering frontend scaffolding ({len(entities)} entities, theme={theme.get('mode', 'dark')})...",
+        f"Rendering frontend scaffolding ({len(entities)} entities, theme={theme.get('mode', 'dark')}, layout={layout})...",
         extra={"step": "frontend_dev"},
     )
 
@@ -77,6 +78,7 @@ def frontend_dev_node(state: PipelineState) -> dict:
         project_title=project_title,
         entities=entities,
         theme=theme,
+        layout=layout,
     )
 
     # ─── Step 3: LLM generates business-logic pages ───────────────────
@@ -267,11 +269,15 @@ def _render_scaffolding(
     project_title: str,
     entities: list[dict],
     theme: dict | None = None,
+    layout: str = "sidebar",
 ) -> dict[str, str]:
     """Render scaffolding files from Jinja2 templates.
 
     This renders ONLY the foundation — config, CSS, reusable components,
     API client, types, router setup. NOT the pages (those come from LLM).
+
+    Args:
+        layout: "sidebar" (default), "topnav", or "minimal"
     """
     if theme is None:
         theme = {"mode": "dark", "brand_color": "#3b82f6", "brand_name": "blue"}
@@ -286,6 +292,7 @@ def _render_scaffolding(
         "project_title": project_title,
         "entities": entities,
         "theme": theme,
+        "layout": layout,
     }
 
     files: dict[str, str] = {}
@@ -318,8 +325,6 @@ def _render_scaffolding(
 
     # ─── src/components/ (reusable, pre-built) ────────────────────────
     component_templates = {
-        "src/components/Layout.tsx": "src/components/Layout.tsx.j2",
-        "src/components/Sidebar.tsx": "src/components/Sidebar.tsx.j2",
         "src/components/DataTable.tsx": "src/components/DataTable.tsx.j2",
         "src/components/FormModal.tsx": "src/components/FormModal.tsx.j2",
         "src/components/ConfirmDialog.tsx": "src/components/ConfirmDialog.tsx.j2",
@@ -330,17 +335,31 @@ def _render_scaffolding(
         "src/components/Tabs.tsx": "src/components/Tabs.tsx.j2",
         "src/components/SearchFilter.tsx": "src/components/SearchFilter.tsx.j2",
         "src/components/EmptyState.tsx": "src/components/EmptyState.tsx.j2",
+        "src/components/Icons.tsx": "src/components/Icons.tsx.j2",
     }
 
     for output_path, template_name in component_templates.items():
         template = env.get_template(template_name)
         files[output_path] = template.render(**context)
 
+    # ─── Layout variant (sidebar, topnav, or minimal) ─────────────────
+    layout_template_map = {
+        "sidebar": "src/components/Layout.tsx.j2",
+        "topnav": "src/components/Layout.topnav.tsx.j2",
+        "minimal": "src/components/Layout.minimal.tsx.j2",
+    }
+    layout_template = layout_template_map.get(layout, "src/components/Layout.tsx.j2")
+    files["src/components/Layout.tsx"] = env.get_template(layout_template).render(**context)
+
+    # Sidebar only needed for sidebar layout
+    if layout == "sidebar":
+        files["src/components/Sidebar.tsx"] = env.get_template("src/components/Sidebar.tsx.j2").render(**context)
+
     # ─── src/App.tsx (router — uses entity names for routes) ──────────
     files["src/App.tsx"] = env.get_template("src/App.tsx.j2").render(**context)
 
     logger.info(
-        f"Scaffolding rendered: {len(files)} files",
+        f"Scaffolding rendered: {len(files)} files (layout={layout})",
         extra={"step": "frontend_dev"},
     )
 
@@ -375,9 +394,6 @@ def _render_fallback_pages(
         entity_context = {**context, "entity": entity}
         file_path = f"src/pages/{entity['type_name']}List.tsx"
         content = entity_list_template.render(**entity_context)
-        # Add ts-nocheck to template-generated pages to prevent type errors
-        if not content.startswith("// @ts-nocheck"):
-            content = "// @ts-nocheck\n" + content
         files[file_path] = content
 
     return files
@@ -447,12 +463,31 @@ def _generate_business_pages(
 
 BROWNFIELD RULES:
 - You MUST replicate the prototype's UI layout, navigation, color scheme, and interactions as closely as possible
-- If the prototype has a different layout than sidebar+content (e.g., top nav, full-width, multi-panel), generate a custom App.tsx that matches
+- Generate a custom src/App.tsx that matches the prototype's navigation and layout pattern
+- Generate a custom src/components/Sidebar.tsx if the prototype has a sidebar with specific sections/groupings
+- Generate a custom src/components/Layout.tsx if the layout differs from the standard sidebar+content pattern
 - If the prototype has charts, dashboards, KPI cards, or custom visualizations, replicate them
 - If the prototype uses specific colors/branding, use those colors in inline styles or CSS classes
 - The goal is: someone looking at the original prototype and the generated app should see the SAME application
 - You may use ANY valid React/TypeScript code — you are NOT limited to the pre-built components for brownfield
 - However, you MUST still use the apiClient for all API calls and the types from '../types'
+
+BROWNFIELD App.tsx REQUIREMENTS:
+- Import React Router: Routes, Route, Navigate, NavLink
+- Import all page components: import DashboardPage from './pages/Dashboard' etc.
+- Replicate the EXACT navigation structure from the prototype:
+  * If sidebar has grouped sections (e.g., "Users" group, "Admin" group), replicate that grouping
+  * If there's a top header with user avatar, notifications, language selector — include it
+  * If nav items have icons, use lucide-react icons that match
+  * Match the active state styling (color, background) from the prototype
+- Use inline styles for colors/spacing that match the prototype exactly
+- Include the app logo/brand name in the sidebar header
+
+BROWNFIELD Sidebar.tsx REQUIREMENTS (generate as src/components/Sidebar.tsx):
+- Match the exact navigation items and their grouping from the prototype
+- Match the active item highlight color
+- Include section headers/dividers if the prototype has them
+- Use NavLink from react-router-dom for navigation items
 """
 
     prompt = f"""Generate the page components for a business application: "{project_title}"
@@ -474,16 +509,18 @@ BROWNFIELD RULES:
 Generate a JSON object where keys are file paths and values are COMPLETE TypeScript/React code.
 
 Required files:
-{"1. src/App.tsx — ONLY for brownfield: Generate a custom App.tsx that replicates the prototype layout. Use React Router (Routes, Route, Navigate) and import your page components. If the prototype has a different navigation pattern (top nav, tabs, no sidebar), implement that." if is_brownfield else ""}
+{"1. src/App.tsx — Generate a custom App.tsx that replicates the prototype layout. Use React Router (Routes, Route, Navigate) and import your page components. Match the prototype's navigation pattern exactly." if is_brownfield else ""}
+{"2. src/components/Sidebar.tsx — Generate a custom Sidebar that matches the prototype's navigation structure (grouped sections, icons, active states, brand logo)." if is_brownfield else ""}
+{"3. src/components/Layout.tsx — Generate a custom Layout if the prototype uses a different pattern than sidebar+content (e.g., top nav + sidebar, full-width header)." if is_brownfield else ""}
 
-{"2" if is_brownfield else "1"}. src/pages/Dashboard.tsx — Business dashboard with:
+{"4" if is_brownfield else "1"}. src/pages/Dashboard.tsx — Business dashboard with:
    - Real KPIs relevant to the business (e.g., "Pending Approvals", "Active Employees", "WFH Today")
    - NOT just row counts — compute meaningful stats from the data
    - Recent activity section showing latest records from the most important entity
    - Quick action buttons
 {"   - For brownfield: replicate the prototype's dashboard/home page layout exactly" if is_brownfield else ""}
 
-{"3" if is_brownfield else "2"}. One page per entity: src/pages/{{TypeName}}List.tsx — Each page should have:
+{"5" if is_brownfield else "2"}. One page per entity: src/pages/{{TypeName}}List.tsx — Each page should have:
    - Search/filter functionality
    - Data table with meaningful columns (show related entity names if possible, not raw UUIDs)
    - WORKFLOW ACTIONS appropriate to the business:
@@ -503,7 +540,7 @@ import React, {{ useState, useEffect, useCallback, useMemo }} from 'react'
 import {{ useNavigate, Routes, Route, Navigate, NavLink, Outlet }} from 'react-router-dom'
 import {{ format, formatDistanceToNow, parseISO, isToday, isThisWeek }} from 'date-fns'
 import {{ BarChart, Bar, LineChart, Line, PieChart, Pie, Cell, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, AreaChart, Area }} from 'recharts'
-import {{ Users, Calendar, CheckCircle, XCircle, Clock, Search, Plus, Edit, Trash2, ChevronRight, Home, BarChart3, FileText, Bell, Settings, Filter, Download, Upload, ArrowUpRight, ArrowDownRight, TrendingUp, AlertCircle, Mail, Phone, MapPin, Building, Briefcase, Shield, Star, Heart, Zap, Activity }} from 'lucide-react'
+import {{ Users, Calendar, CheckCircle, XCircle, Clock, Search, Plus, Edit, Trash2, ChevronRight, Home, BarChart3, FileText, Bell, Settings, Filter, Download, Upload, ArrowUpRight, ArrowDownRight, TrendingUp, AlertCircle, Mail, Phone, MapPin, Building, Briefcase, Shield, Star, Heart, Zap, Activity }} from '../components/Icons'
 import DataTable, {{ Column }} from '../components/DataTable'
 import FormModal, {{ FormField }} from '../components/FormModal'
 import ConfirmDialog from '../components/ConfirmDialog'
@@ -565,7 +602,8 @@ CRITICAL USAGE PATTERNS:
 - DetailPanel: `<DetailPanel title="Details" fields={{[{{ label: 'Name', value: item.name }}]}} onBack={{() => setSelected(null)}} />`
 - FormModal: `<FormModal title="Create" fields={{formFields}} values={{formValues}} onChange={{(k,v) => setFormValues({{...formValues, [k]: v}})}} onSubmit={{handleSubmit}} onClose={{() => setShowForm(false)}} />`
 
-{"For brownfield App.tsx, import pages as: import DashboardPage from './pages/Dashboard' etc." if is_brownfield else ""}
+{"For brownfield App.tsx: import pages as: import DashboardPage from './pages/Dashboard', import EntityList from './pages/EntityList' etc. Use NavLink for sidebar navigation." if is_brownfield else ""}
+{"For brownfield Sidebar.tsx: export default component, use NavLink from react-router-dom, match the prototype's nav structure." if is_brownfield else ""}
 {"For brownfield, you MAY write custom JSX with inline styles to match the prototype exactly." if is_brownfield else ""}
 
 DO NOT import: axios, lodash, moment, dayjs, any external library not listed above.
@@ -573,7 +611,9 @@ DO NOT use: Tailwind classes.
 {"You CAN use inline styles (style={{...}}) for brownfield to match prototype colors/layout." if is_brownfield else "DO NOT use inline styles with {{}}."}
 
 ## ICONS & VISUALS
-- Use lucide-react icons extensively — they make the app look professional:
+- Import icons from '../components/Icons' (NOT directly from 'lucide-react'):
+  import {{ Building, Users, Calendar, ... }} from '../components/Icons'
+- Use icons extensively — they make the app look professional:
   * Navigation: Home, Users, Calendar, FileText, Settings, Bell
   * Actions: Plus, Edit, Trash2, Download, Upload, Filter, Search
   * Status: CheckCircle, XCircle, Clock, AlertCircle, Shield
@@ -695,6 +735,12 @@ Each file MUST:
     # For brownfield: if LLM generated App.tsx, include it (overrides template)
     if "src/App.tsx" in page_files:
         logger.info("Brownfield: LLM generated custom App.tsx (overriding template)", extra={"step": "frontend_dev"})
+
+    # For brownfield: if LLM generated Layout/Sidebar, include them (overrides template)
+    if "src/components/Layout.tsx" in page_files:
+        logger.info("Brownfield: LLM generated custom Layout.tsx (overriding template)", extra={"step": "frontend_dev"})
+    if "src/components/Sidebar.tsx" in page_files:
+        logger.info("Brownfield: LLM generated custom Sidebar.tsx (overriding template)", extra={"step": "frontend_dev"})
 
     logger.info(
         f"LLM generated {len(page_files)} business pages",

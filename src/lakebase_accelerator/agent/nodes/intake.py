@@ -22,6 +22,7 @@ You MUST return valid JSON with this exact structure:
   "clarification_questions": [],
   "project_name": "kebab-case-name",
   "theme": {"mode": "dark", "brand_color": "#3b82f6", "brand_name": "blue"},
+  "layout": "sidebar",
   "entities": [
     {
       "name": "entity_name_singular_snake_case",
@@ -48,6 +49,10 @@ Rules:
 - theme.mode: "dark" (default) or "light" — only set to "light" if user explicitly asks for light/white theme
 - theme.brand_color: hex color for primary brand — default "#3b82f6" (blue). Change ONLY if user mentions a specific color (e.g., "green theme" → "#22c55e", "red" → "#ef4444", "purple" → "#8b5cf6", "orange" → "#f97316", "yellow" → "#eab308")
 - theme.brand_name: human-readable color name (e.g., "blue", "green", "purple")
+- layout: choose the best layout for the application type:
+  * "sidebar" (default) — for admin panels, CRM, project management, multi-entity apps with 4+ entities
+  * "topnav" — for public-facing apps, portfolios, blogs, landing pages, apps with 2-3 entities
+  * "minimal" — for single-purpose tools, simple CRUD apps with 1-2 entities, personal utilities
 - Return ONLY the JSON, no markdown, no explanation, no trailing text
 """
 
@@ -105,6 +110,7 @@ def intake_node(state: PipelineState) -> dict:
         "entities": result.get("entities", []),
         "relationships": result.get("relationships", []),
         "theme": result.get("theme", {"mode": "dark", "brand_color": "#3b82f6", "brand_name": "blue"}),
+        "layout": result.get("layout", "sidebar"),
         "current_step": "intake",
         "completed_steps": ["intake"],
     }

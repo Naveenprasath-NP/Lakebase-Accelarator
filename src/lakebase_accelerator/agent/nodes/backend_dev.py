@@ -170,31 +170,13 @@ def _generate_backend(state: PipelineState) -> dict:
     # app.yaml — from settings
     backend_files["app.yaml"] = _generate_app_yaml(schema_name, app_name)
 
-    # ─── LLM-generated routes (with template as reference) ───────────
+    # ─── Template-based routes (deterministic, no LLM — guaranteed working) ─
 
-    # Get the reference template so LLM knows the exact pattern
-    reference_route = _generate_route_from_template(tables[0]) if tables else ""
-
-    # For brownfield: include prototype context so LLM can add custom endpoints
-    prototype_context = state.get("prototype_context", "")
-    brownfield_prompt = prompt
-    if prototype_context and state.get("pipeline_type") == "brownfield":
-        brownfield_prompt = (
-            f"{prompt}\n\n"
-            f"## PROTOTYPE CONTEXT (replicate this backend functionality):\n"
-            f"{prototype_context}\n\n"
-            f"IMPORTANT: Generate endpoints that match the prototype's API structure and business logic. "
-            f"Don't just create basic CRUD — replicate the prototype's actual functionality."
-        )
-
-    # Generate routes using LLM with template context
-    extra_requirements = []
     for table in tables:
         file_path = f"src/routes/{table['name']}.py"
         logger.info(f"Generating: {file_path}", extra={"step": "backend_dev"})
-        content, deps = _generate_route_with_llm(table, data_model, brownfield_prompt, reference_route, data_model_summary)
+        content = _generate_route_from_template(table, data_model)
         backend_files[file_path] = content
-        extra_requirements.extend(deps)
 
     # Generate routes/__init__.py (re-export)
     if tables:
@@ -215,9 +197,8 @@ def _generate_backend(state: PipelineState) -> dict:
             "from fastapi import APIRouter\n\nrouter = APIRouter()\n\n__all__ = [\"router\"]\n"
         )
 
-    # Merge requirements (base + any extra the LLM declared)
-    all_requirements = list(set(base_requirements + extra_requirements))
-    backend_files["requirements.txt"] = "\n".join(sorted(all_requirements)) + "\n"
+    # Requirements (fixed set — no LLM additions needed for template routes)
+    backend_files["requirements.txt"] = "\n".join(sorted(base_requirements)) + "\n"
 
     # Force src/__init__.py empty (safety net)
     backend_files["src/__init__.py"] = '"""Source package."""\n'
@@ -446,43 +427,64 @@ def _render_template(template_name: str, context: dict) -> str:
     return template.render(**context)
 
 
-def _generate_route_from_template(table: dict) -> str:
+def _generate_route_from_template(table: dict, data_model: dict = None) -> str:
     """Generate a route file from the entity template using table definition.
 
-    This is 100% deterministic — no LLM involved. The template produces
-    the exact same pattern that worked in the deployed simple-notes-app.
+    This is 100% deterministic — no LLM involved. Produces guaranteed-working
+    CRUD routes with search, pagination, stats, JOINs for FK names, and optional status endpoint.
     """
+    if data_model is None:
+        data_model = {}
+
     entity_name = table["name"]
-    # Pluralize simply (add 's' if not already plural)
     entity_plural = entity_name if entity_name.endswith("s") else f"{entity_name}s"
+    display_name = entity_name.replace("_", " ").title()
+    display_name_plural = entity_plural.replace("_", " ").title()
+    type_name = "".join(word.capitalize() for word in entity_name.split("_"))
 
     columns = []
+    foreign_keys = []
+    status_column = None
+
     for col in table.get("columns", []):
+        if col["name"] in ("id", "created_at", "updated_at"):
+            continue
         python_type = _pg_type_to_python(col.get("data_type", "text"))
+        nullable = col.get("nullable", True)
         columns.append({
             "name": col["name"],
             "python_type": python_type,
-            "is_nullable": col.get("is_nullable", True) or col["name"] in ("id", "created_at", "updated_at"),
+            "nullable": nullable,
+        })
+        if "status" in col["name"]:
+            status_column = col["name"]
+
+    # Build FK info with display expressions for JOINs
+    all_tables = {t["name"]: t for t in data_model.get("tables", [])}
+    for fk in table.get("foreign_keys", []):
+        ref_table = fk.get("references_table", "")
+        # Determine the best display column for the referenced table
+        display_expr = _get_display_expression(ref_table, all_tables.get(ref_table, {}))
+        foreign_keys.append({
+            "column": fk.get("column", ""),
+            "references_table": ref_table,
+            "references_column": fk.get("references_column", "id"),
+            "display_expression": display_expr,
         })
 
-    # Build column helpers for SQL
-    all_col_names = [c["name"] for c in columns]
-    insert_cols = [c["name"] for c in columns if c["name"] not in ("id", "created_at", "updated_at")]
-
-    column_names = ", ".join(all_col_names)
-    insert_columns = ", ".join(insert_cols)
-    insert_placeholders = ", ".join(["%s"] * len(insert_cols))
-    insert_values = ", ".join([f"item.{c}" for c in insert_cols])
-
-    return _render_template("routes_entity.py.j2", {
-        "entity_name": entity_name,
-        "entity_plural": entity_plural,
+    entity_context = {
+        "name": entity_name,
+        "plural": entity_plural,
+        "display_name": display_name,
+        "display_name_plural": display_name_plural,
+        "type_name": type_name,
         "columns": columns,
-        "column_names": column_names,
-        "insert_columns": insert_columns,
-        "insert_placeholders": insert_placeholders,
-        "insert_values": insert_values,
-    })
+        "foreign_keys": foreign_keys,
+        "has_status": status_column is not None,
+        "status_column": status_column or "status",
+    }
+
+    return _render_template("routes_entity.py.j2", {"entity": entity_context})
 
 
 def _generate_route_with_llm(table: dict, data_model: dict, user_prompt: str, reference_route: str, data_model_summary: str) -> tuple[str, list[str]]:
@@ -633,6 +635,43 @@ def _pg_type_to_python(pg_type: str) -> str:
         if pg_type.startswith(key):
             return value
     return "str"
+
+
+def _get_display_expression(ref_table_name: str, ref_table_def: dict) -> str:
+    """Determine the best SQL expression to display a human-readable name for a referenced table.
+
+    Looks for common name patterns in the referenced table's columns:
+    - first_name + last_name → CONCAT(first_name, ' ', last_name)
+    - name → name
+    - title → title
+    - email → email
+    - Falls back to id::text
+    """
+    if not ref_table_def:
+        return "id::text"
+
+    col_names = [c["name"] for c in ref_table_def.get("columns", [])]
+
+    # Check for first_name + last_name pattern (people tables)
+    if "first_name" in col_names and "last_name" in col_names:
+        return "CONCAT(first_name, ' ', last_name)"
+
+    # Check for common single-name columns
+    for candidate in ("name", "title", "label", "display_name", "full_name", "email", "username"):
+        if candidate in col_names:
+            return candidate
+
+    # Fallback: use the first text-like column that isn't an ID or timestamp
+    for col in ref_table_def.get("columns", []):
+        if col["name"] in ("id", "created_at", "updated_at"):
+            continue
+        if col["name"].endswith("_id"):
+            continue
+        pg_type = col.get("data_type", "").upper()
+        if any(t in pg_type for t in ("TEXT", "VARCHAR", "CHAR")):
+            return col["name"]
+
+    return "id::text"
 
 
 def _strip_markdown(text: str) -> str:

@@ -1335,3 +1335,120 @@ a:hover { text-decoration: underline; }
     width: 100%;
   }
 }
+
+/* ══════════════════════════════════════════════════════════════════════
+   TOP NAV LAYOUT
+   ══════════════════════════════════════════════════════════════════════ */
+
+.app-layout-topnav {
+  flex-direction: column;
+}
+
+.topnav {
+  display: flex;
+  align-items: center;
+  gap: var(--space-lg);
+  padding: var(--space-sm) var(--space-lg);
+  background: var(--bg-surface);
+  border-bottom: 1px solid var(--border-default);
+  height: 56px;
+  flex-shrink: 0;
+}
+
+.topnav-brand {
+  font-size: 1.1rem;
+  font-weight: 700;
+  color: var(--brand-primary);
+  white-space: nowrap;
+}
+
+.topnav-links {
+  display: flex;
+  gap: var(--space-xs);
+  overflow-x: auto;
+}
+
+.topnav-link {
+  padding: var(--space-xs) var(--space-sm);
+  border-radius: var(--radius-md);
+  color: var(--text-secondary);
+  text-decoration: none;
+  font-size: 0.875rem;
+  font-weight: 500;
+  white-space: nowrap;
+  transition: all 0.15s ease;
+}
+
+.topnav-link:hover {
+  color: var(--text-primary);
+  background: var(--bg-hover);
+}
+
+.topnav-link.active {
+  color: var(--brand-primary);
+  background: var(--brand-primary-light);
+}
+
+.main-content-topnav {
+  flex: 1;
+  overflow-y: auto;
+  padding: var(--space-lg);
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+   MINIMAL LAYOUT
+   ══════════════════════════════════════════════════════════════════════ */
+
+.app-layout-minimal {
+  flex-direction: column;
+}
+
+.minimal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--space-md) var(--space-xl);
+  background: var(--bg-surface);
+  border-bottom: 1px solid var(--border-default);
+  flex-shrink: 0;
+}
+
+.minimal-brand {
+  font-size: 1.25rem;
+  font-weight: 700;
+  color: var(--text-primary);
+  margin: 0;
+}
+
+.minimal-nav {
+  display: flex;
+  gap: var(--space-md);
+}
+
+.minimal-link {
+  color: var(--text-secondary);
+  text-decoration: none;
+  font-size: 0.875rem;
+  font-weight: 500;
+  padding: var(--space-xs) 0;
+  border-bottom: 2px solid transparent;
+  transition: all 0.15s ease;
+}
+
+.minimal-link:hover {
+  color: var(--text-primary);
+}
+
+.minimal-link.active {
+  color: var(--brand-primary);
+  border-bottom-color: var(--brand-primary);
+}
+
+.main-content-minimal {
+  flex: 1;
+  overflow-y: auto;
+  padding: var(--space-xl) var(--space-xl);
+  max-width: 1200px;
+  margin: 0 auto;
+  width: 100%;
+}

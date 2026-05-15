@@ -18,6 +18,7 @@ from lakebase_accelerator.settings import get_settings
 from lakebase_accelerator.utils.logger import logger
 
 _cached_token: str | None = None
+_token_expiry: float = 0  # Unix timestamp when token expires
 
 
 def get_llm(max_tokens: int = 4096, project_id: str = "", call_type: str = "pipeline") -> ChatOpenAI:
@@ -53,9 +54,14 @@ def get_llm(max_tokens: int = 4096, project_id: str = "", call_type: str = "pipe
 
 
 def _get_workspace_token(settings) -> str:
-    """Get workspace OAuth token using SP credentials (cached)."""
-    global _cached_token
-    if _cached_token:
+    """Get workspace OAuth token using SP credentials.
+
+    Caches the token and refreshes it 5 minutes before expiry (tokens last 60 min).
+    """
+    global _cached_token, _token_expiry
+
+    # Return cached token if still valid (with 5 min buffer)
+    if _cached_token and time.time() < (_token_expiry - 300):
         return _cached_token
 
     token_url = f"{settings.databricks_host}/oidc/v1/token"
@@ -69,15 +75,21 @@ def _get_workspace_token(settings) -> str:
     if response.status_code != 200:
         raise RuntimeError(f"Failed to get workspace token: {response.status_code}")
 
-    _cached_token = response.json()["access_token"]
-    logger.info("Workspace OAuth token acquired for LLM")
+    token_data = response.json()
+    _cached_token = token_data["access_token"]
+    # Token typically expires in 3600s (1 hour)
+    expires_in = token_data.get("expires_in", 3600)
+    _token_expiry = time.time() + expires_in
+
+    logger.info(f"Workspace OAuth token acquired for LLM (expires in {expires_in}s)")
     return _cached_token
 
 
 def reset_token_cache() -> None:
     """Reset the cached token (call on 401 errors)."""
-    global _cached_token
+    global _cached_token, _token_expiry
     _cached_token = None
+    _token_expiry = 0
 
 
 def invoke_with_logging(

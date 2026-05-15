@@ -9,6 +9,7 @@ in state so the pipeline can route back to backend_dev for self-healing.
 """
 
 import base64
+import json
 import time
 
 import httpx
@@ -91,7 +92,11 @@ def deployment_node(state: PipelineState) -> dict:
         app_data = create_resp.json()
 
     app_url = app_data.get("url", "")
-    sp_client_id = app_data.get("service_principal_client_id", "")
+    sp_client_id = (
+        app_data.get("service_principal_client_id", "")
+        or app_data.get("effective_service_principal_id", "")
+        or (app_data.get("service_principal", {}).get("client_id", "") if isinstance(app_data.get("service_principal"), dict) else "")
+    )
 
     logger.info(f"App ready: {app_name}, SP: {sp_client_id}", extra={"step": "deployment"})
 
@@ -99,6 +104,55 @@ def deployment_node(state: PipelineState) -> dict:
     logger.info("Waiting for app compute to be ACTIVE...", extra={"step": "deployment"})
     if not _wait_for_active(settings.databricks_host, token, app_name, timeout=300):
         return {"error": "App did not reach ACTIVE state", "current_step": "deployment"}
+
+    # ─── Step 4b: Re-fetch app details to get SP (created asynchronously) ─
+    # Always re-fetch after ACTIVE to get the most up-to-date SP info
+    try:
+        app_resp = httpx.get(
+            f"{settings.databricks_host}/api/2.0/apps/{app_name}",
+            headers=headers,
+            timeout=15.0,
+        )
+        if app_resp.status_code == 200:
+            app_data = app_resp.json()
+
+            # Log the full response keys for debugging SP field discovery
+            logger.info(
+                f"App API response keys: {list(app_data.keys())}",
+                extra={"step": "deployment"},
+            )
+
+            # Try multiple known field names for the SP identifier
+            sp_client_id = (
+                app_data.get("service_principal_client_id", "")
+                or app_data.get("effective_service_principal_id", "")
+                or app_data.get("service_principal_id", "")
+            )
+
+            # Try nested service_principal object
+            sp_obj = app_data.get("service_principal", {})
+            if not sp_client_id and isinstance(sp_obj, dict):
+                sp_client_id = sp_obj.get("client_id", "") or sp_obj.get("id", "") or sp_obj.get("application_id", "")
+                if sp_obj:
+                    logger.info(f"SP object fields: {sp_obj}", extra={"step": "deployment"})
+
+            # Try effective_service_principal nested object
+            eff_sp = app_data.get("effective_service_principal", {})
+            if not sp_client_id and isinstance(eff_sp, dict):
+                sp_client_id = eff_sp.get("id", "") or eff_sp.get("client_id", "") or eff_sp.get("application_id", "")
+                if eff_sp:
+                    logger.info(f"Effective SP object: {eff_sp}", extra={"step": "deployment"})
+
+            if sp_client_id:
+                logger.info(f"SP discovered: {sp_client_id}", extra={"step": "deployment"})
+            else:
+                # Log full response for debugging
+                logger.warning(
+                    f"SP not found in app response. Full response: {json.dumps(app_data)[:1000]}",
+                    extra={"step": "deployment"},
+                )
+    except Exception as e:
+        logger.warning(f"Failed to re-fetch app details for SP: {e}", extra={"step": "deployment"})
 
     # ─── Step 5: Deploy code ─────────────────────────────────────────
     logger.info("Deploying code...", extra={"step": "deployment"})
@@ -147,9 +201,39 @@ def deployment_node(state: PipelineState) -> dict:
         try:
             repo = _get_repo()
             repo.grant_schema_access(schema_name, sp_client_id)
-            logger.info(f"Granted schema access to SP: {sp_client_id}", extra={"step": "deployment"})
+            logger.info(
+                f"Granted schema access: {schema_name} → {sp_client_id}",
+                extra={"step": "deployment"},
+            )
         except Exception as e:
-            logger.warning(f"Permission grant failed (non-fatal): {e}")
+            logger.warning(
+                f"Permission grant failed for SP '{sp_client_id}' on schema '{schema_name}': {e}",
+                extra={"step": "deployment"},
+            )
+            # Try with the app_name as the role (Databricks Apps auto-creates a role with the app name)
+            try:
+                repo.grant_schema_access(schema_name, app_name)
+                logger.info(
+                    f"Granted schema access using app_name as role: {schema_name} → {app_name}",
+                    extra={"step": "deployment"},
+                )
+            except Exception as e2:
+                logger.warning(f"Permission grant with app_name also failed: {e2}", extra={"step": "deployment"})
+    else:
+        # No SP discovered — try granting to app_name directly (Databricks Apps creates a Postgres role with the app name)
+        logger.warning(
+            f"No SP client_id found. Attempting grant using app_name '{app_name}' as Postgres role.",
+            extra={"step": "deployment"},
+        )
+        try:
+            repo = _get_repo()
+            repo.grant_schema_access(schema_name, app_name)
+            logger.info(
+                f"Granted schema access using app_name: {schema_name} → {app_name}",
+                extra={"step": "deployment"},
+            )
+        except Exception as e:
+            logger.warning(f"Permission grant with app_name failed: {e}", extra={"step": "deployment"})
 
     # Get final URL
     if not app_url or app_url == "Unavailable":

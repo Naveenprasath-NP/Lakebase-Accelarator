@@ -105,3 +105,4 @@ class PipelineState(TypedDict):
 
     # ─── Theme ───────────────────────────────────────────────────────
     theme: dict  # {"mode": "dark"|"light", "brand_color": "#hex", "brand_name": "color_name"}
+    layout: str  # "sidebar"|"topnav"|"minimal" — detected from prompt/entity count

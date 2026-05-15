@@ -1,24 +1,24 @@
-"""{{ entity_name | capitalize }} CRUD API routes."""
+"""{{ entity.display_name }} CRUD API routes — auto-generated, guaranteed working."""
 
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, HTTPException, Query, status
 from pydantic import BaseModel
 from psycopg2 import sql
 
 from src.database import get_db_cursor
 
-router = APIRouter(prefix="/api/{{ entity_plural }}", tags=["{{ entity_plural }}"])
+router = APIRouter(prefix="/api/{{ entity.plural }}", tags=["{{ entity.plural }}"])
 
 
 # ─── Pydantic Models ─────────────────────────────────────────────────
 
-class {{ entity_name | capitalize }}Create(BaseModel):
-    """Request model for creating a {{ entity_name }}."""
-{% for col in columns if col.name not in ['id', 'created_at', 'updated_at'] %}
-{% if col.is_nullable %}
+class {{ entity.type_name }}Create(BaseModel):
+    """Request model for creating a {{ entity.display_name | lower }}."""
+{% for col in entity.columns %}
+{% if col.nullable %}
     {{ col.name }}: Optional[{{ col.python_type }}] = None
 {% else %}
     {{ col.name }}: {{ col.python_type }}
@@ -26,122 +26,258 @@ class {{ entity_name | capitalize }}Create(BaseModel):
 {% endfor %}
 
 
-class {{ entity_name | capitalize }}Update(BaseModel):
-    """Request model for updating a {{ entity_name }}."""
-{% for col in columns if col.name not in ['id', 'created_at', 'updated_at'] %}
+class {{ entity.type_name }}Update(BaseModel):
+    """Request model for updating a {{ entity.display_name | lower }}."""
+{% for col in entity.columns %}
     {{ col.name }}: Optional[{{ col.python_type }}] = None
-{% endfor %}
-
-
-class {{ entity_name | capitalize }}Response(BaseModel):
-    """Response model for a {{ entity_name }}."""
-{% for col in columns %}
-{% if col.is_nullable %}
-    {{ col.name }}: Optional[{{ col.python_type }}] = None
-{% else %}
-    {{ col.name }}: {{ col.python_type }}
-{% endif %}
 {% endfor %}
 
 
 # ─── Routes ──────────────────────────────────────────────────────────
 
-@router.get("", response_model=list[{{ entity_name | capitalize }}Response])
-def get_{{ entity_plural }}():
-    """Get all {{ entity_plural }} ordered by creation date."""
+@router.get("")
+def list_{{ entity.plural }}(
+    search: Optional[str] = Query(None, description="Search across text fields"),
+    status_filter: Optional[str] = Query(None, alias="status", description="Filter by status"),
+    limit: int = Query(100, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
+):
+    """Get all {{ entity.display_name_plural | lower }} with optional search and pagination."""
     with get_db_cursor() as cur:
+        conditions = []
+        params: list = []
+
+        if search:
+            search_fields = []
+{% for col in entity.columns if col.python_type == 'str' and '_id' not in col.name %}
+            search_fields.append("t.{{ col.name }} ILIKE %s")
+            params.append("%" + search + "%")
+{% endfor %}
+{% for fk in entity.foreign_keys %}
+            search_fields.append("{{ fk.column }}_joined.name_display ILIKE %s")
+            params.append("%" + search + "%")
+{% endfor %}
+            if search_fields:
+                conditions.append("(" + " OR ".join(search_fields) + ")")
+
+{% for col in entity.columns if 'status' in col.name %}
+        if status_filter:
+            conditions.append("t.{{ col.name }} = %s")
+            params.append(status_filter)
+{% endfor %}
+
+        where_clause = ""
+        if conditions:
+            where_clause = "WHERE " + " AND ".join(conditions)
+
+{% if entity.foreign_keys %}
+        # Build JOIN query to resolve FK names
+        query_str = (
+            "SELECT t.*"
+{% for fk in entity.foreign_keys %}
+            ", {{ fk.column }}_joined.name_display as {{ fk.column }}_name"
+{% endfor %}
+            " FROM {} t"
+{% for fk in entity.foreign_keys %}
+            " LEFT JOIN LATERAL ("
+            "   SELECT {{ fk.display_expression }} as name_display"
+            "   FROM {{ fk.references_table }} WHERE id = t.{{ fk.column }}"
+            " ) {{ fk.column }}_joined ON true"
+{% endfor %}
+            " " + where_clause +
+            " ORDER BY t.created_at DESC LIMIT %s OFFSET %s"
+        )
+{% else %}
+        query_str = "SELECT t.* FROM {} t " + where_clause + " ORDER BY t.created_at DESC LIMIT %s OFFSET %s"
+{% endif %}
+        params.extend([limit, offset])
+
         cur.execute(
-            sql.SQL(
-                "SELECT {{ column_names }} FROM {table} ORDER BY created_at DESC"
-            ).format(table=sql.Identifier("{{ entity_name }}"))
+            sql.SQL(query_str).format(sql.Identifier("{{ entity.name }}")),
+            params,
         )
         rows = cur.fetchall()
         return [dict(row) for row in rows]
 
 
-@router.get("/{item_id}", response_model={{ entity_name | capitalize }}Response)
-def get_{{ entity_name }}(item_id: str):
-    """Get a single {{ entity_name }} by ID."""
+@router.get("/stats")
+def get_{{ entity.plural }}_stats():
+    """Get statistics for dashboard."""
     with get_db_cursor() as cur:
+        # Total count
         cur.execute(
-            sql.SQL(
-                "SELECT {{ column_names }} FROM {table} WHERE id = %s"
-            ).format(table=sql.Identifier("{{ entity_name }}")),
+            sql.SQL("SELECT COUNT(*) as total FROM {}").format(sql.Identifier("{{ entity.name }}"))
+        )
+        total = cur.fetchone()["total"]
+
+        # Created today
+        cur.execute(
+            sql.SQL("SELECT COUNT(*) as count FROM {} WHERE created_at >= CURRENT_DATE").format(
+                sql.Identifier("{{ entity.name }}")
+            )
+        )
+        today_count = cur.fetchone()["count"]
+
+        # Created this week
+        cur.execute(
+            sql.SQL("SELECT COUNT(*) as count FROM {} WHERE created_at >= CURRENT_DATE - INTERVAL '7 days'").format(
+                sql.Identifier("{{ entity.name }}")
+            )
+        )
+        week_count = cur.fetchone()["count"]
+
+{% if entity.has_status %}
+        # Count by status
+        cur.execute(
+            sql.SQL("SELECT {{ entity.status_column }}, COUNT(*) as count FROM {} GROUP BY {{ entity.status_column }}").format(
+                sql.Identifier("{{ entity.name }}")
+            )
+        )
+        by_status = {}
+        for row in cur.fetchall():
+            by_status[row["{{ entity.status_column }}"] or "unknown"] = row["count"]
+{% else %}
+        by_status = {}
+{% endif %}
+
+        return {
+            "total": total,
+            "today_count": today_count,
+            "week_count": week_count,
+            "by_status": by_status,
+        }
+
+
+@router.get("/{item_id}")
+def get_{{ entity.name }}(item_id: str):
+    """Get a single {{ entity.display_name | lower }} by ID."""
+    with get_db_cursor() as cur:
+{% if entity.foreign_keys %}
+        query_str = (
+            "SELECT t.*"
+{% for fk in entity.foreign_keys %}
+            ", {{ fk.column }}_joined.name_display as {{ fk.column }}_name"
+{% endfor %}
+            " FROM {} t"
+{% for fk in entity.foreign_keys %}
+            " LEFT JOIN LATERAL ("
+            "   SELECT {{ fk.display_expression }} as name_display"
+            "   FROM {{ fk.references_table }} WHERE id = t.{{ fk.column }}"
+            " ) {{ fk.column }}_joined ON true"
+{% endfor %}
+            " WHERE t.id = %s"
+        )
+{% else %}
+        query_str = "SELECT t.* FROM {} t WHERE t.id = %s"
+{% endif %}
+        cur.execute(
+            sql.SQL(query_str).format(sql.Identifier("{{ entity.name }}")),
             (item_id,),
         )
         row = cur.fetchone()
         if not row:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="{{ entity_name | capitalize }} not found")
+            raise HTTPException(status_code=404, detail="{{ entity.display_name }} not found")
         return dict(row)
 
 
-@router.post("", response_model={{ entity_name | capitalize }}Response, status_code=status.HTTP_201_CREATED)
-def create_{{ entity_name }}(item: {{ entity_name | capitalize }}Create):
-    """Create a new {{ entity_name }}."""
+@router.post("", status_code=201)
+def create_{{ entity.name }}(item: {{ entity.type_name }}Create):
+    """Create a new {{ entity.display_name | lower }}."""
     item_id = str(uuid.uuid4())
     now = datetime.utcnow()
 
     with get_db_cursor(commit=True) as cur:
+        values = [
+            item_id,
+{% for col in entity.columns %}
+            item.{{ col.name }},
+{% endfor %}
+            now,
+            now,
+        ]
+        col_str = "id, {{ entity.columns | map(attribute='name') | join(', ') }}, created_at, updated_at"
+        placeholders = ", ".join(["%s"] * len(values))
+
         cur.execute(
-            sql.SQL(
-                "INSERT INTO {table} (id, {{ insert_columns }}, created_at, updated_at) "
-                "VALUES (%s, {{ insert_placeholders }}, %s, %s) "
-                "RETURNING {{ column_names }}"
-            ).format(table=sql.Identifier("{{ entity_name }}")),
-            (item_id, {{ insert_values }}, now, now),
+            sql.SQL("INSERT INTO {} (" + col_str + ") VALUES (" + placeholders + ") RETURNING *").format(
+                sql.Identifier("{{ entity.name }}")
+            ),
+            values,
         )
-        created = cur.fetchone()
-        return dict(created)
+        row = cur.fetchone()
+        return dict(row)
 
 
-@router.put("/{item_id}", response_model={{ entity_name | capitalize }}Response)
-def update_{{ entity_name }}(item_id: str, item: {{ entity_name | capitalize }}Update):
-    """Update an existing {{ entity_name }}."""
+@router.put("/{item_id}")
+def update_{{ entity.name }}(item_id: str, item: {{ entity.type_name }}Update):
+    """Update a {{ entity.display_name | lower }}."""
     with get_db_cursor(commit=True) as cur:
         # Check exists
         cur.execute(
-            sql.SQL("SELECT id FROM {table} WHERE id = %s").format(table=sql.Identifier("{{ entity_name }}")),
+            sql.SQL("SELECT id FROM {} WHERE id = %s").format(sql.Identifier("{{ entity.name }}")),
             (item_id,),
         )
         if not cur.fetchone():
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="{{ entity_name | capitalize }} not found")
+            raise HTTPException(status_code=404, detail="{{ entity.display_name }} not found")
 
         # Build dynamic update
-        update_fields = []
-        update_values = []
-{% for col in columns if col.name not in ['id', 'created_at', 'updated_at'] %}
+        set_parts = []
+        params: list = []
+
+{% for col in entity.columns %}
         if item.{{ col.name }} is not None:
-            update_fields.append(sql.SQL("{field} = %s").format(field=sql.Identifier("{{ col.name }}")))
-            update_values.append(item.{{ col.name }})
+            set_parts.append("{{ col.name }} = %s")
+            params.append(item.{{ col.name }})
 {% endfor %}
 
-        if not update_fields:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No fields to update")
+        if not set_parts:
+            raise HTTPException(status_code=400, detail="No fields to update")
 
-        update_fields.append(sql.SQL("{field} = %s").format(field=sql.Identifier("updated_at")))
-        update_values.append(datetime.utcnow())
-        update_values.append(item_id)
+        set_parts.append("updated_at = %s")
+        params.append(datetime.utcnow())
+        params.append(item_id)
+
+        set_clause = ", ".join(set_parts)
 
         cur.execute(
-            sql.SQL(
-                "UPDATE {table} SET {fields} WHERE id = %s RETURNING {{ column_names }}"
-            ).format(
-                table=sql.Identifier("{{ entity_name }}"),
-                fields=sql.SQL(", ").join(update_fields),
+            sql.SQL("UPDATE {} SET " + set_clause + " WHERE id = %s RETURNING *").format(
+                sql.Identifier("{{ entity.name }}")
             ),
-            update_values,
+            params,
         )
-        updated = cur.fetchone()
-        return dict(updated)
+        row = cur.fetchone()
+        return dict(row)
 
 
-@router.delete("/{item_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_{{ entity_name }}(item_id: str):
-    """Delete a {{ entity_name }} by ID."""
+@router.delete("/{item_id}", status_code=204)
+def delete_{{ entity.name }}(item_id: str):
+    """Delete a {{ entity.display_name | lower }}."""
     with get_db_cursor(commit=True) as cur:
         cur.execute(
-            sql.SQL("DELETE FROM {table} WHERE id = %s RETURNING id").format(table=sql.Identifier("{{ entity_name }}")),
+            sql.SQL("DELETE FROM {} WHERE id = %s RETURNING id").format(sql.Identifier("{{ entity.name }}")),
             (item_id,),
         )
         if not cur.fetchone():
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="{{ entity_name | capitalize }} not found")
+            raise HTTPException(status_code=404, detail="{{ entity.display_name }} not found")
+{% if entity.has_status %}
+
+
+@router.patch("/{item_id}/status")
+def update_{{ entity.name }}_status(item_id: str, body: dict):
+    """Update the status of a {{ entity.display_name | lower }}."""
+    new_status = body.get("status")
+    if not new_status:
+        raise HTTPException(status_code=400, detail="status field is required")
+
+    with get_db_cursor(commit=True) as cur:
+        cur.execute(
+            sql.SQL("UPDATE {} SET {{ entity.status_column }} = %s, updated_at = %s WHERE id = %s RETURNING id").format(
+                sql.Identifier("{{ entity.name }}")
+            ),
+            (new_status, datetime.utcnow(), item_id),
+        )
+        row = cur.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="{{ entity.display_name }} not found")
+        return {"id": item_id, "status": new_status}
+{% endif %}
